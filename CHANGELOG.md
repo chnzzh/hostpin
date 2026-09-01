@@ -3,6 +3,16 @@
 All notable changes to Hostpin are documented here. Hostpin follows semantic
 versioning for public releases.
 
+## 0.1.1 — 2026-09-01
+
+### Deployment
+
+- The Linux server installer now listens on `0.0.0.0:8080` by default and asks
+  for the public URL on first installation.
+- Pressing Enter selects the detected private address on port 8080; automation
+  can continue to use `--public-url`, and public plain HTTP remains rejected.
+- Updated the English and Chinese host deployment documentation.
+
 ## 0.1.0 — 2026-08-31
 
 First public release.

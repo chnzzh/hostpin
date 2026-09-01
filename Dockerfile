@@ -24,6 +24,6 @@ COPY --from=build /out/hostpin-server /usr/local/bin/hostpin-server
 USER hostpin
 VOLUME ["/var/lib/hostpin"]
 EXPOSE 8080
-ENV HOSTPIN_LISTEN=:8080 HOSTPIN_PUBLIC_URL=http://localhost:8080 HOSTPIN_DATA_DIR=/var/lib/hostpin
+ENV HOSTPIN_LISTEN=0.0.0.0:8080 HOSTPIN_PUBLIC_URL=http://localhost:8080 HOSTPIN_DATA_DIR=/var/lib/hostpin
 ENTRYPOINT ["/usr/local/bin/hostpin-server"]
 CMD ["serve", "--config", "/var/lib/hostpin/hostpin.yaml"]

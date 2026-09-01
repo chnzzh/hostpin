@@ -11,9 +11,7 @@ selected.
 The release installer supports `amd64` and `arm64` Linux hosts running systemd:
 
 ```sh
-curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-server.sh \
-  | sudo sh -s -- --public-url https://monitor.example.com \
-      --listen 127.0.0.1:8080
+curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-server.sh | sudo sh
 ```
 
 It performs the following operations:
@@ -24,12 +22,27 @@ It performs the following operations:
 - writes a SQLite configuration to `/etc/hostpin/hostpin.yaml`;
 - stores durable state in `/var/lib/hostpin` and starts the service.
 
+On a fresh installation it prompts for the public URL through `/dev/tty`. The
+suggested value is `http://<detected-private-address>:8080`; pressing Enter
+accepts it. The default listener is `0.0.0.0:8080`, so it is reachable from the
+host's networks when the firewall permits that port. Public plain-HTTP URLs
+are rejected: enter an HTTPS URL for an Internet-facing deployment.
+
 The installer preserves the existing configuration and data directory when it
 is rerun. It saves the previous executable as
 `/usr/local/bin/hostpin-server.rollback`. To install a specific release, add
-`--version v0.1.0`. The example binds only to loopback because Caddy or Nginx
-is expected to provide public HTTPS; omit `--listen` only when port 8080 must
-be reachable directly from another host.
+`--version v0.1.1`. Existing installations read the URL from their preserved
+configuration and do not ask again.
+
+Automation can provide the URL without a prompt:
+
+```sh
+curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-server.sh \
+  | sudo sh -s -- --public-url https://monitor.example.com
+```
+
+When a reverse proxy on the same host is the only intended client, add
+`--listen 127.0.0.1:8080` to avoid exposing port 8080 directly.
 
 Useful maintenance commands:
 
@@ -50,8 +63,8 @@ monitor.example.com {
 }
 ```
 
-Set `--public-url` to that exact external HTTPS origin. After startup, open
-`https://monitor.example.com/setup`.
+Enter that exact external HTTPS origin at the installer prompt, or pass it with
+`--public-url`. After startup, open `https://monitor.example.com/setup`.
 
 ## Docker Compose
 

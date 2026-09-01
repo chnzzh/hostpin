@@ -9,6 +9,9 @@ import (
 
 func TestDefaultDatabaseIsSQLite(t *testing.T) {
 	cfg := Default()
+	if cfg.Listen != "0.0.0.0:8080" {
+		t.Fatalf("default listen address = %q, want 0.0.0.0:8080", cfg.Listen)
+	}
 	if cfg.Database.Driver != "sqlite" {
 		t.Fatalf("default database driver = %q, want sqlite", cfg.Database.Driver)
 	}

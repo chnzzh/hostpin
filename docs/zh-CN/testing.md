@@ -79,7 +79,7 @@ Probe-only 模式单独测量，因为它不会初始化主机采集器。
 | PIN 限流、Argon2id、全局熔断、可信代理 | `internal/security`、HTTP 校验测试、浏览器 CSRF 测试 |
 | 注册身份和凭据幂等 | SQLite/PostgreSQL 集成、`internal/enrollment`、浏览器安装流程 |
 | Unix 安装器下载、校验和与参数转发 | 安装器单测、真实 `install.sh` Linux 冒烟测试 |
-| 服务端一键安装、校验、SQLite 配置与升级保留 | CI 和 `make release-check` 中的 `tests/e2e/server_installer.sh` |
+| 服务端一键安装、URL 问答、默认监听、校验、SQLite 配置、不安全 HTTP 拒绝与升级保留 | CI 和 `make release-check` 中的 `tests/e2e/server_installer.sh` |
 | 一行卸载与身份保留边界 | `uninstall.sh` 语法、危险模式拒绝及 `--dry-run` Linux 冒烟测试 |
 | CPU/内存/磁盘/网络/GPU 采集 | `internal/collector`、平台 CI、Linux 冒烟测试 |
 | WebSocket 实时与 HTTP 兜底 | `internal/agent`、浏览器/Linux 冒烟、容量负载 |

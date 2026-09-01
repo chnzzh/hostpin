@@ -50,9 +50,7 @@ SQLite is the default database in every example below.
 On a Linux `amd64` or `arm64` host using systemd:
 
 ```sh
-curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-server.sh \
-  | sudo sh -s -- --public-url https://monitor.example.com \
-      --listen 127.0.0.1:8080
+curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-server.sh | sudo sh
 ```
 
 The installer downloads the matching release binary and checksum, creates a
@@ -61,9 +59,18 @@ starts `hostpin-server`. Data is stored in `/var/lib/hostpin`, while the
 configuration is `/etc/hostpin/hostpin.yaml`. Rerunning the command upgrades
 the binary without replacing either location.
 
-The installer does not configure DNS, TLS, or a reverse proxy. Point the URL at
-the host first and terminate HTTPS with Caddy, Nginx, or another proxy. Then
-open `https://monitor.example.com/setup`.
+On the first run it asks for the public URL and suggests the detected private
+address on port 8080. Press Enter to accept it. Hostpin listens on
+`0.0.0.0:8080` by default, so the direct setup page is available from the
+private network. For an Internet deployment, enter the existing HTTPS URL
+instead; the installer does not configure DNS, TLS, or a reverse proxy.
+
+For unattended installation, pass the URL explicitly:
+
+```sh
+curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-server.sh \
+  | sudo sh -s -- --public-url https://monitor.example.com
+```
 
 ### Docker Compose
 

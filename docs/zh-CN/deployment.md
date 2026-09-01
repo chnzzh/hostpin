@@ -11,9 +11,7 @@ Docker Compose，均不需要 PostgreSQL；首次启动会自动执行数据库�
 适用于采用 systemd 的 Linux `amd64`/`arm64` 服务器：
 
 ```sh
-curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-server.sh \
-  | sudo sh -s -- --public-url https://monitor.example.com \
-      --listen 127.0.0.1:8080
+curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-server.sh | sudo sh
 ```
 
 脚本会自动完成：
@@ -23,10 +21,24 @@ curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-se
 - 生成 `/etc/hostpin/hostpin.yaml`，数据库明确使用 SQLite；
 - 将持久数据保存到 `/var/lib/hostpin` 并启动服务。
 
+全新安装会通过 `/dev/tty` 询问公开 URL，默认建议值为
+`http://<检测到的私网地址>:8080`，直接回车即可采用。服务默认监听
+`0.0.0.0:8080`，防火墙放行后可从服务器所在网络直接访问。公网明文 HTTP 地址会被
+拒绝；互联网部署应输入 HTTPS URL。
+
 重复运行时会保留配置和数据，只替换服务端程序；旧程序保存在
 `/usr/local/bin/hostpin-server.rollback`。需要固定版本时附加
-`--version v0.1.0`。示例只监听本机地址，由 Caddy 或 Nginx 提供公网 HTTPS；只有
-确实需要其他设备直接访问 8080 端口时，才应去掉 `--listen` 参数。
+`--version v0.1.1`。已有配置会直接读取其中的 URL，不会再次询问。
+
+无人值守安装可直接传入 URL：
+
+```sh
+curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-server.sh \
+  | sudo sh -s -- --public-url https://monitor.example.com
+```
+
+如果只有同一台服务器上的反向代理需要访问 Hostpin，可附加
+`--listen 127.0.0.1:8080`，避免直接暴露 8080 端口。
 
 常用维护命令：
 
@@ -46,8 +58,8 @@ monitor.example.com {
 }
 ```
 
-`--public-url` 必须填写用户实际访问的完整 HTTPS 地址。服务启动后打开
-`https://monitor.example.com/setup`。
+在安装器问答中输入用户实际访问的完整 HTTPS 地址，也可以通过 `--public-url`
+传入。服务启动后打开 `https://monitor.example.com/setup`。
 
 ## Docker Compose 安装
 
@@ -103,7 +115,7 @@ make build GO=/path/to/go1.26/bin/go
 
 ### 单二进制 + SQLite
 
-无配置启动时，Hostpin 监听 `:8080`，数据目录为 `./data`，数据库为
+无配置启动时，Hostpin 监听 `0.0.0.0:8080`，数据目录为 `./data`，数据库为
 `./data/hostpin.db`：
 
 ```sh

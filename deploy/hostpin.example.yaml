@@ -1,4 +1,4 @@
-listen: ":8080"
+listen: "0.0.0.0:8080"
 public_url: "https://monitor.example.com"
 # Optional self-hosted Agent artifact directory exposed over HTTPS.
 agent_release_base: "https://monitor.example.com/downloads"

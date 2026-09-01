@@ -44,9 +44,7 @@ Hostpin v0.1.0 是首个公开版本，采用面向生产的单实例架构。�
 适用于使用 systemd 的 Linux `amd64`/`arm64` 服务器：
 
 ```sh
-curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-server.sh \
-  | sudo sh -s -- --public-url https://monitor.example.com \
-      --listen 127.0.0.1:8080
+curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-server.sh | sudo sh
 ```
 
 脚本会下载正式版服务端及 SHA-256 校验文件，创建受限的 `hostpin` 服务账户，生成
@@ -54,9 +52,17 @@ SQLite 配置并启动 systemd 服务。数据位于 `/var/lib/hostpin`，配置
 `/etc/hostpin/hostpin.yaml`。以后重新执行同一命令即可升级，已有配置和数据不会被
 覆盖。
 
-一键脚本不会代为修改 DNS，也不会安装 HTTPS 证书或反向代理。请提前把域名指向
-服务器，并使用 Caddy、Nginx 等提供 HTTPS，然后打开
-`https://monitor.example.com/setup`。
+首次安装会询问公开 URL，并以检测到的私网地址和 `8080` 端口作为默认值，直接回车
+即可。服务默认监听 `0.0.0.0:8080`，局域网内可以直接打开提示的 `/setup` 地址。
+公网部署时应输入已经配置好的 HTTPS URL；脚本不会代为修改 DNS，也不会安装证书
+或反向代理。
+
+无人值守安装可直接传入 URL：
+
+```sh
+curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-server.sh \
+  | sudo sh -s -- --public-url https://monitor.example.com
+```
 
 ### Docker Compose 安装
 

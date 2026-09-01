@@ -2,8 +2,9 @@
 set -eu
 
 repository="chnzzh/hostpin"
-public_url="http://127.0.0.1:8080"
-listen_address=":8080"
+public_url=""
+public_url_set=0
+listen_address="0.0.0.0:8080"
 version=""
 destination_root="${DESTDIR:-}"
 
@@ -16,8 +17,9 @@ Usage:
 
 Options:
   --public-url URL  External origin used in links and Agent installers.
-                    Defaults to http://127.0.0.1:8080.
-  --listen ADDRESS  HTTP listen address. Defaults to :8080.
+                    When omitted, the installer asks interactively. Pressing
+                    Enter uses the detected private address on port 8080.
+  --listen ADDRESS  HTTP listen address. Defaults to 0.0.0.0:8080.
   --version VERSION Install a specific GitHub release instead of latest.
   -h, --help        Show this help.
 
@@ -32,6 +34,78 @@ fail() {
   exit 1
 }
 
+is_private_ipv4() {
+  case "$1" in
+    10.*|127.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_safe_plain_http_host() {
+  normalized_http_host=$(printf '%s\n' "$1" | awk '{ print tolower($0) }')
+  if is_private_ipv4 "$normalized_http_host"; then
+    return 0
+  fi
+  case "$normalized_http_host" in
+    localhost|::1|fc[0-9a-f][0-9a-f]:*|fd[0-9a-f][0-9a-f]:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+detect_default_host() {
+  if [ -n "${HOSTPIN_INSTALLER_DEFAULT_HOST:-}" ]; then
+    [ -n "$destination_root" ] || fail "HOSTPIN_INSTALLER_DEFAULT_HOST may be used only with DESTDIR"
+    printf '%s\n' "$HOSTPIN_INSTALLER_DEFAULT_HOST"
+    return
+  fi
+  detected_host=""
+  if command -v ip >/dev/null 2>&1; then
+    detected_host=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }' || true)
+    if is_private_ipv4 "$detected_host"; then
+      printf '%s\n' "$detected_host"
+      return
+    fi
+  fi
+  if command -v hostname >/dev/null 2>&1; then
+    for detected_host in $(hostname -I 2>/dev/null || true); do
+      if is_private_ipv4 "$detected_host"; then
+        printf '%s\n' "$detected_host"
+        return
+      fi
+    done
+  fi
+  printf '127.0.0.1\n'
+}
+
+read_config_public_url() {
+  awk '$1 == "public_url:" { sub(/^[^:]*:[[:space:]]*/, ""); gsub(/^"|"$/, ""); print; exit }' "$1"
+}
+
+validate_public_url() {
+  case "$public_url" in
+    http://*) url_remainder=${public_url#http://}; url_scheme=http ;;
+    https://*) url_remainder=${public_url#https://}; url_scheme=https ;;
+    *) fail "public URL must begin with http:// or https://" ;;
+  esac
+  case "$url_remainder" in
+    */) url_authority=${url_remainder%/} ;;
+    */*) fail "public URL must not contain a path" ;;
+    *) url_authority=$url_remainder ;;
+  esac
+  [ -n "$url_authority" ] || fail "public URL must include a host"
+  case "$url_authority" in
+    *'@'*|*'?'*|*'#'*) fail "public URL must not contain credentials, a query, or a fragment" ;;
+  esac
+  if [ "$url_scheme" = http ]; then
+    case "$url_authority" in
+      \[*\]*) url_host=${url_authority#\[}; url_host=${url_host%%\]*} ;;
+      *) url_host=${url_authority%%:*} ;;
+    esac
+    is_safe_plain_http_host "$url_host" || \
+      fail "plain HTTP is limited to localhost/private addresses; use an HTTPS public URL"
+  fi
+}
+
 require_value() {
   [ "$#" -ge 2 ] && [ -n "$2" ] || fail "$1 requires a value"
 }
@@ -41,6 +115,7 @@ while [ "$#" -gt 0 ]; do
     --public-url)
       require_value "$@"
       public_url=$2
+      public_url_set=1
       shift 2
       ;;
     --listen)
@@ -68,6 +143,14 @@ case "$destination_root" in
   *) fail "DESTDIR must be an absolute path" ;;
 esac
 
+binary_path="$destination_root/usr/local/bin/hostpin-server"
+config_directory="$destination_root/etc/hostpin"
+config_path="$config_directory/hostpin.yaml"
+data_directory="$destination_root/var/lib/hostpin"
+unit_directory="$destination_root/etc/systemd/system"
+unit_path="$unit_directory/hostpin-server.service"
+[ ! -L "$config_path" ] || fail "refusing to read or write through symlink: $config_path"
+
 if [ -n "$destination_root" ]; then
   platform="${HOSTPIN_INSTALLER_PLATFORM:-$(uname -s)}"
   machine="${HOSTPIN_INSTALLER_ARCH:-$(uname -m)}"
@@ -90,13 +173,33 @@ if [ -z "$destination_root" ]; then
   command -v systemctl >/dev/null 2>&1 || fail "systemd is required; use the Docker or manual installation instead"
 fi
 
-case "$public_url" in
-  http://*|https://*) ;;
-  *) fail "--public-url must begin with http:// or https://" ;;
-esac
+for command_name in awk grep install mktemp; do
+  command -v "$command_name" >/dev/null 2>&1 || fail "required command is missing: $command_name"
+done
+
+if [ -z "$public_url" ] && [ -f "$config_path" ]; then
+  public_url=$(read_config_public_url "$config_path")
+fi
+if [ -z "$public_url" ]; then
+  default_host=$(detect_default_host)
+  suggested_public_url="http://$default_host:8080"
+  if [ -n "${HOSTPIN_INSTALLER_ACCEPT_DEFAULT:-}" ]; then
+    [ -n "$destination_root" ] || fail "HOSTPIN_INSTALLER_ACCEPT_DEFAULT may be used only with DESTDIR"
+    public_url=$suggested_public_url
+  elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    printf 'Public URL (HTTPS recommended) [%s]: ' "$suggested_public_url" > /dev/tty
+    public_url_answer=""
+    if IFS= read -r public_url_answer < /dev/tty; then :; fi
+    public_url=${public_url_answer:-$suggested_public_url}
+  else
+    fail "--public-url is required when no interactive terminal is available"
+  fi
+fi
+
 if printf '%s\n%s\n' "$public_url" "$listen_address" | grep -q '[[:space:]"\\]'; then
   fail "URL and listen address must not contain whitespace, quotes, or backslashes"
 fi
+validate_public_url
 if [ -n "$version" ]; then
   printf '%s\n' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$' || \
     fail "--version must be a semantic version such as v1.2.3"
@@ -114,10 +217,6 @@ case "$release_base" in
   file://*) [ -n "$destination_root" ] || fail "file:// artifacts require DESTDIR" ;;
   *) fail "release artifacts must be downloaded over HTTPS" ;;
 esac
-
-for command_name in awk grep install mktemp; do
-  command -v "$command_name" >/dev/null 2>&1 || fail "required command is missing: $command_name"
-done
 
 temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/hostpin-server-install.XXXXXX")
 cleanup() {
@@ -166,13 +265,6 @@ else
 fi
 [ "$actual_hash" = "$expected_hash" ] || fail "release checksum verification failed"
 
-binary_path="$destination_root/usr/local/bin/hostpin-server"
-config_directory="$destination_root/etc/hostpin"
-config_path="$config_directory/hostpin.yaml"
-data_directory="$destination_root/var/lib/hostpin"
-unit_directory="$destination_root/etc/systemd/system"
-unit_path="$unit_directory/hostpin-server.service"
-
 if [ -z "$destination_root" ]; then
   if ! command -v getent >/dev/null 2>&1; then
     fail "getent is required to create the Hostpin service account"
@@ -202,7 +294,6 @@ fi
 install -m 0755 "$temporary_directory/$artifact" "$binary_path.new"
 mv -f "$binary_path.new" "$binary_path"
 
-[ ! -L "$config_path" ] || fail "refusing to write through symlink: $config_path"
 if [ ! -f "$config_path" ]; then
   cat > "$config_path" <<EOF
 listen: "$listen_address"
@@ -237,6 +328,13 @@ EOF
   fi
 else
   printf 'Preserving existing configuration: %s\n' "$config_path"
+  preserved_public_url=$(read_config_public_url "$config_path")
+  if [ -n "$preserved_public_url" ]; then
+    if [ "$public_url_set" -eq 1 ] && [ "$preserved_public_url" != "$public_url" ]; then
+      printf 'Ignoring --public-url because the existing configuration is preserved; edit the file to change it.\n'
+    fi
+    public_url=$preserved_public_url
+  fi
 fi
 
 [ ! -L "$unit_path" ] || fail "refusing to write through symlink: $unit_path"
@@ -287,6 +385,6 @@ printf '  Setup:   %s/setup\n' "${public_url%/}"
 printf '  Config:  %s\n' "$config_path"
 printf '  Data:    %s\n' "$data_directory"
 printf '  Status:  systemctl status hostpin-server\n'
-if [ "$public_url" = "http://127.0.0.1:8080" ]; then
-  printf '  Remote access: configure HTTPS and update public_url before enrolling remote Agents.\n'
-fi
+case "$public_url" in
+  http://*) printf '  Note: plain HTTP is for localhost/private setup only; use HTTPS before Internet enrollment.\n' ;;
+esac

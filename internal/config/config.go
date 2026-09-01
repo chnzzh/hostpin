@@ -55,7 +55,7 @@ type RuntimeConfig struct {
 
 func Default() Config {
 	return Config{
-		Listen: ":8080", PublicURL: "http://localhost:8080", DataDir: "./data",
+		Listen: "0.0.0.0:8080", PublicURL: "http://localhost:8080", DataDir: "./data",
 		LogLevel: "info",
 		Database: DatabaseConfig{Driver: "sqlite", DSN: "./data/hostpin.db"},
 		GeoIP: GeoIPConfig{
