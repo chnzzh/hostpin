@@ -1,0 +1,22 @@
+[Unit]
+Description=Hostpin self-hosted monitoring server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hostpin
+Group=hostpin
+ExecStart=/usr/local/bin/hostpin-server serve --config /etc/hostpin/hostpin.yaml
+Restart=always
+RestartSec=5s
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hostpin
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,222 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: hostpin_test
+          POSTGRES_USER: hostpin
+          POSTGRES_PASSWORD: hostpin-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hostpin -d hostpin_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      HOSTPIN_TEST_POSTGRES: postgres://hostpin:hostpin-test@127.0.0.1:5432/hostpin_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.7
+          cache: true
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 25
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Frontend dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+      - name: Frontend typecheck and build
+        working-directory: web
+        run: pnpm build
+      - name: Frontend unit tests
+        working-directory: web
+        run: pnpm test --run
+      - name: Frontend dependency audit
+        working-directory: web
+        run: pnpm --registry=https://registry.npmjs.org audit --audit-level high
+      - name: Go tests with SQLite and PostgreSQL
+        run: go test ./...
+      - name: Go vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+      - name: Server installer test
+        run: tests/e2e/server_installer.sh
+      - name: Race-sensitive tests
+        run: go test -race ./internal/core ./internal/httpapi ./internal/security ./internal/alerting ./internal/notification ./internal/store/sqlstore ./internal/backup
+      - name: Vet
+        run: go vet ./...
+      - name: Build server
+        run: go build ./cmd/hostpin-server
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.7
+          cache: true
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 25
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: tests/e2e/requirements.txt
+      - name: Build Hostpin
+        run: |
+          pnpm --dir web install --frozen-lockfile
+          pnpm --dir web build
+          mkdir -p bin
+          go build -trimpath -o bin/hostpin-server ./cmd/hostpin-server
+          go build -trimpath -o bin/hostpin-agent ./cmd/hostpin-agent
+      - name: Install browser runtime
+        run: |
+          python -m pip install -r tests/e2e/requirements.txt
+          python -m playwright install --with-deps chromium
+      - name: Download pinned theme fixtures
+        run: |
+          curl -fL --retry 3 -o /tmp/hostpin-theme-komari-default.zip https://github.com/komari-monitor/komari-web/releases/download/1.4.3/dist-release.zip
+          curl -fL --retry 3 -o /tmp/hostpin-theme-carbon.zip https://github.com/gengyue2468/komari-theme-carbon/releases/download/v0.1.6/komari-theme-carbon-v0.1.6.zip
+          curl -fL --retry 3 -o /tmp/hostpin-theme-pulse.zip https://github.com/LJAYi/komari-theme-pulse/releases/download/v0.2.0/komari-theme-pulse-v0.2.0.zip
+          printf '%s  %s\n' 51d2ca2939c2b41afd8cc4a0213799d8ea18bc5ca034b7713990ea044bb41563 /tmp/hostpin-theme-komari-default.zip | sha256sum -c -
+          printf '%s  %s\n' f34b0aa42e12b5f7a2e25996c3f288585417277cdfefac51d2cd4ea72897a07c /tmp/hostpin-theme-carbon.zip | sha256sum -c -
+          printf '%s  %s\n' 89a3d47a2d6467fbb674a9ffb17b63754937213fdece58bfa49568792cfc2a2b /tmp/hostpin-theme-pulse.zip | sha256sum -c -
+      - name: Browser and Komari theme compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          data_dir="$(mktemp -d /tmp/hostpin-browser.XXXXXX)"
+          HOSTPIN_LISTEN=127.0.0.1:18082 \
+          HOSTPIN_PUBLIC_URL=http://127.0.0.1:18082 \
+          HOSTPIN_DATA_DIR="$data_dir" \
+          HOSTPIN_DB_DRIVER=sqlite \
+          HOSTPIN_DB_DSN="$data_dir/hostpin.db" \
+          HOSTPIN_GEOIP_ENABLED=false \
+          HOSTPIN_OFFLINE_AFTER=10s \
+          ./bin/hostpin-server serve --config "$data_dir/missing.yaml" >"$data_dir/server.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+          for _ in {1..60}; do curl -fsS http://127.0.0.1:18082/readyz >/dev/null && break; sleep .25; done
+          curl -fsS http://127.0.0.1:18082/readyz >/dev/null
+          python tests/e2e/browser_smoke.py
+          python tests/e2e/theme_compat.py
+          ! grep -E 'panic|fatal|"level":"ERROR"|level=ERROR' "$data_dir/server.log"
+      - name: Encrypted backup and live restore browser flow
+        shell: bash
+        run: |
+          set -euo pipefail
+          data_dir="$(mktemp -d /tmp/hostpin-backup-browser.XXXXXX)"
+          HOSTPIN_LISTEN=127.0.0.1:18084 \
+          HOSTPIN_PUBLIC_URL=http://127.0.0.1:18084 \
+          HOSTPIN_DATA_DIR="$data_dir" \
+          HOSTPIN_DB_DRIVER=sqlite \
+          HOSTPIN_DB_DSN="$data_dir/hostpin.db" \
+          HOSTPIN_GEOIP_ENABLED=false \
+          ./bin/hostpin-server serve --config "$data_dir/missing.yaml" >"$data_dir/server.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+          for _ in {1..60}; do curl -fsS http://127.0.0.1:18084/readyz >/dev/null && break; sleep .25; done
+          curl -fsS http://127.0.0.1:18084/readyz >/dev/null
+          HOSTPIN_E2E_BASE_URL=http://127.0.0.1:18084 python tests/e2e/backup_restore.py
+          ! grep -E 'panic|fatal|"level":"ERROR"|level=ERROR' "$data_dir/server.log"
+
+      - name: Carrier latency browser flow
+        shell: bash
+        run: |
+          set -euo pipefail
+          data_dir="$(mktemp -d /tmp/hostpin-carrier-browser.XXXXXX)"
+          HOSTPIN_LISTEN=127.0.0.1:18085 \
+          HOSTPIN_PUBLIC_URL=http://127.0.0.1:18085 \
+          HOSTPIN_DATA_DIR="$data_dir" \
+          HOSTPIN_DB_DRIVER=sqlite \
+          HOSTPIN_DB_DSN="$data_dir/hostpin.db" \
+          HOSTPIN_GEOIP_ENABLED=false \
+          ./bin/hostpin-server serve --config "$data_dir/missing.yaml" >"$data_dir/server.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+          for _ in {1..60}; do curl -fsS http://127.0.0.1:18085/readyz >/dev/null && break; sleep .25; done
+          curl -fsS http://127.0.0.1:18085/readyz >/dev/null
+          HOSTPIN_E2E_BASE_URL=http://127.0.0.1:18085 python tests/e2e/carrier_latency.py
+          ! grep -E 'panic|fatal|"level":"ERROR"|level=ERROR' "$data_dir/server.log"
+
+  cross-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.7
+      - name: Cross-compile every supported Agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/hostpin-cross
+          targets=(linux/amd64 linux/arm64 linux/386 linux/arm/7 linux/mips linux/mipsle linux/riscv64 windows/amd64 windows/arm64 darwin/amd64 darwin/arm64 freebsd/amd64 freebsd/arm64)
+          for target in "${targets[@]}"; do
+            IFS=/ read -r os arch arm <<< "$target"
+            output="/tmp/hostpin-cross/${os}-${arch}${arm:+-${arm}}"
+            GOOS="$os" GOARCH="$arch" GOARM="${arm:-}" CGO_ENABLED=0 go build -trimpath -o "$output" ./cmd/hostpin-agent
+          done
+
+  agent-platform:
+    name: Agent runtime / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.7
+          cache: true
+      - name: Platform collector and installer tests
+        run: go test ./internal/collector ./internal/agentconfig ./internal/enrollment ./internal/installer ./internal/probe ./internal/service
+      - name: Real platform collection smoke test
+        run: go run ./cmd/hostpin-agent collect --full=false
+
+  agent-performance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.7
+          cache: true
+      - name: Build Linux runtime
+        run: |
+          test_root="$(mktemp -d /tmp/hostpin-agent-performance.XXXXXX)"
+          printf '%s\n' "$test_root" > /tmp/hostpin-agent-performance-path
+          CGO_ENABLED=0 go build -trimpath -o "$test_root/hostpin-server" ./cmd/hostpin-server
+          CGO_ENABLED=0 go build -trimpath -o "$test_root/hostpin-agent" ./cmd/hostpin-agent
+      - name: Enforce Agent RSS, CPU, reporting, and API targets
+        run: tests/e2e/linux_smoke.sh "$(cat /tmp/hostpin-agent-performance-path)"

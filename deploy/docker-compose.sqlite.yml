@@ -1,0 +1,23 @@
+services:
+  hostpin:
+    build:
+      context: ..
+    image: hostpin:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      HOSTPIN_PUBLIC_URL: ${HOSTPIN_PUBLIC_URL:-http://localhost:8080}
+      HOSTPIN_DB_DRIVER: sqlite
+      HOSTPIN_DB_DSN: /var/lib/hostpin/hostpin.db
+      HOSTPIN_GEOIP_ENABLED: ${HOSTPIN_GEOIP_ENABLED:-true}
+    volumes:
+      - hostpin-data:/var/lib/hostpin
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/readyz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  hostpin-data:

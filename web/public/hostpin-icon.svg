@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Hostpin</title>
+  <path d="M32 3C18.2 3 7 13.8 7 27.2c0 16.3 17.6 29.7 23.3 33.5a3 3 0 0 0 3.4 0C39.4 56.9 57 43.5 57 27.2 57 13.8 45.8 3 32 3Z" fill="#55d2bc" stroke="#0f1416" stroke-width="3" stroke-linejoin="round"/>
+  <circle cx="32" cy="27" r="10" fill="#0f1416"/>
+  <circle cx="32" cy="27" r="4" fill="#f1f5f3"/>
+</svg>

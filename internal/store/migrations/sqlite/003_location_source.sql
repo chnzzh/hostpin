@@ -1,0 +1,1 @@
+ALTER TABLE nodes ADD COLUMN location_manual INTEGER NOT NULL DEFAULT 0;

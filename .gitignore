@@ -1,0 +1,31 @@
+.DS_Store
+.idea/
+.vscode/
+
+# Go
+/bin/
+/dist/
+/coverage/
+*.test
+*.prof
+
+# Frontend
+/web/node_modules/
+/web/dist/
+/web/.vite/
+*.tsbuildinfo
+
+# Runtime data and local configuration
+/data/
+/hostpin.yaml
+*.hostpin-backup
+/.env
+/.env.*
+!/.env.example
+
+# Tool caches
+/.cache/
+/.tools/
+/.release/
+__pycache__/
+*.pyc

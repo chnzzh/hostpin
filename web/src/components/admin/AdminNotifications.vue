@@ -1,0 +1,37 @@
+<script setup lang="ts">
+import { onMounted, ref } from 'vue'
+import { api, unwrap } from '../../api'
+import { clone } from '../../clone'
+import type { NotificationChannel } from '../../types'
+import { useLocale } from '../../i18n'
+
+const channels = ref<NotificationChannel[]>([])
+const editing = ref<NotificationChannel | null>(null)
+const config = ref<Record<string, any>>({})
+const error = ref('')
+const status = ref('')
+const { text } = useLocale()
+
+async function load() { channels.value = unwrap(await api<{ data: NotificationChannel[] }>('/api/v1/admin/notifications')) }
+function blank(type: NotificationChannel['type'] = 'webhook'): NotificationChannel { return { id: 0, name: '', type, enabled: true, config: {} } }
+function edit(channel: NotificationChannel) { editing.value = clone(channel); config.value = clone(channel.config ?? {}); if (Array.isArray(config.value.to)) config.value.to = config.value.to.join(', ') }
+function create() { editing.value = blank(); config.value = {} }
+function changeType() { config.value = {} }
+async function save() {
+  if (!editing.value) return
+  error.value = ''; status.value = ''
+  const outgoing = clone(config.value)
+  if (editing.value.type === 'smtp' && typeof outgoing.to === 'string') outgoing.to = outgoing.to.split(/[,;]/).map((value: string) => value.trim()).filter(Boolean)
+  try {
+    const payload = { ...editing.value, config: outgoing }
+    const path = editing.value.id ? `/api/v1/admin/notifications/${editing.value.id}` : '/api/v1/admin/notifications'
+    await api(path, { method: editing.value.id ? 'PUT' : 'POST', body: JSON.stringify(payload) })
+    editing.value = null; await load()
+  } catch (reason) { error.value = reason instanceof Error ? reason.message : text('无法保存通知渠道。', 'Could not save channel.') }
+}
+async function test(channel: NotificationChannel) { status.value = text(`正在测试 ${channel.name}…`, `Testing ${channel.name}…`); try { await api(`/api/v1/admin/notifications/${channel.id}/test`, { method: 'POST' }); status.value = text(`${channel.name}：已发送`, `${channel.name}: delivered`) } catch (reason) { status.value = reason instanceof Error ? reason.message : text('发送失败。', 'Delivery failed.') } }
+async function remove(channel: NotificationChannel) { if (confirm(text(`删除通知渠道“${channel.name}”？`, `Delete channel “${channel.name}”?`))) { await api(`/api/v1/admin/notifications/${channel.id}`, { method: 'DELETE' }); await load() } }
+onMounted(load)
+</script>
+
+<template><section class="admin-page"><header class="page-title"><div><span class="eyebrow">{{ text('告警通知', 'Alert delivery') }}</span><h1>{{ text('通知渠道', 'Notifications') }}</h1><p>{{ text('配置 SMTP、Telegram、Bark 或 Webhook；失败任务会在 1、5、15 分钟后重试。', 'Configure SMTP, Telegram, Bark, or Webhook with durable retries.') }}</p></div><button class="primary-action compact-action" @click="create">+ {{ text('新建渠道', 'New channel') }}</button></header><div v-if="status" class="notice"><b>{{ text('发送测试', 'Delivery test') }}</b><span>{{ status }}</span></div><div class="channel-grid"><article v-for="channel in channels" :key="channel.id" class="channel-card"><div class="channel-glyph">{{ { smtp: '@', telegram: '↗', bark: '◉', webhook: '{}' }[channel.type] }}</div><div><span>{{ channel.type.toUpperCase() }}</span><h3>{{ channel.name }}</h3><p>{{ channel.config?.configured ? text('凭据已加密保存', 'Credentials encrypted') : text('配置不可用', 'Configuration unavailable') }}</p></div><span class="tag" :class="{ muted: !channel.enabled }">{{ channel.enabled ? text('启用', 'Active') : text('暂停', 'Paused') }}</span><footer><button @click="test(channel)">{{ text('测试', 'Test') }}</button><button @click="edit(channel)">{{ text('编辑', 'Edit') }}</button><button class="danger" @click="remove(channel)">{{ text('删除', 'Delete') }}</button></footer></article></div><div v-if="!channels.length" class="empty-state admin-empty"><span>◇</span><h3>{{ text('暂无通知渠道', 'No notification channels') }}</h3><p>{{ text('未配置渠道时，告警事件仍会保存在数据库中。', 'Alert events remain persisted before a channel is configured.') }}</p></div><div v-if="editing" class="modal-backdrop" @click.self="editing = null"><form class="drawer" @submit.prevent="save"><header><div><span>{{ text('通知渠道', 'Notification channel') }}</span><h2>{{ editing.id ? text('编辑渠道', 'Edit channel') : text('新建渠道', 'New channel') }}</h2></div><button type="button" @click="editing = null">×</button></header><div class="drawer-body"><div class="form-grid"><label><span>{{ text('名称', 'Name') }}</span><input v-model="editing.name" required /></label><label><span>{{ text('类型', 'Type') }}</span><select v-model="editing.type" @change="changeType"><option>webhook</option><option>smtp</option><option>telegram</option><option>bark</option></select></label><template v-if="editing.type === 'webhook'"><label class="wide"><span>Webhook URL</span><input v-model="config.url" type="url" required /></label><label class="wide"><span>HMAC Secret <small>{{ config.secret_configured ? text('留空保持不变', 'Leave blank to keep') : text('可选', 'Optional') }}</small></span><input v-model="config.secret" type="password" /></label></template><template v-else-if="editing.type === 'telegram'"><label class="wide"><span>Bot Token <small>{{ config.bot_token_configured ? text('留空保持不变', 'Leave blank to keep') : '' }}</small></span><input v-model="config.bot_token" type="password" required /></label><label><span>Chat ID</span><input v-model="config.chat_id" required /></label><label><span>API Base <small>{{ text('可选', 'Optional') }}</small></span><input v-model="config.api_base" placeholder="https://api.telegram.org" /></label></template><template v-else-if="editing.type === 'bark'"><label class="wide"><span>Device Key <small>{{ config.device_key_configured ? text('留空保持不变', 'Leave blank to keep') : '' }}</small></span><input v-model="config.device_key" type="password" required /></label><label><span>Endpoint</span><input v-model="config.endpoint" placeholder="https://api.day.app" /></label><label><span>{{ text('分组', 'Group') }}</span><input v-model="config.group" placeholder="Hostpin" /></label></template><template v-else><label><span>SMTP Host</span><input v-model="config.host" required /></label><label><span>{{ text('端口', 'Port') }}</span><input v-model.number="config.port" type="number" min="1" max="65535" /></label><label><span>{{ text('发件人', 'From') }}</span><input v-model="config.from" type="email" required /></label><label class="wide"><span>{{ text('收件人（逗号分隔）', 'Recipients (comma separated)') }}</span><input v-model="config.to" required /></label><label><span>{{ text('用户名', 'Username') }}</span><input v-model="config.username" /></label><label><span>{{ text('密码', 'Password') }} <small>{{ config.password_configured ? text('留空保持不变', 'Leave blank to keep') : '' }}</small></span><input v-model="config.password" type="password" /></label><label class="switch-line"><input v-model="config.require_tls" type="checkbox" /><span>{{ text('要求 STARTTLS', 'Require STARTTLS') }}</span></label><label class="switch-line"><input v-model="config.implicit_tls" type="checkbox" /><span>{{ text('隐式 TLS', 'Implicit TLS') }}</span></label></template></div><label class="switch-line"><input v-model="editing.enabled" type="checkbox" /><span>{{ text('启用渠道', 'Channel enabled') }}</span></label><div v-if="error" class="form-error">{{ error }}</div></div><footer><button type="button" @click="editing = null">{{ text('取消', 'Cancel') }}</button><button class="primary-action">{{ text('保存渠道', 'Save channel') }}</button></footer></form></div></section></template>
