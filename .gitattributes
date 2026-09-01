@@ -1,0 +1,13 @@
+* text=auto eol=lf
+
+*.ico binary
+*.png binary
+*.webp binary
+*.zip binary
+*.hostpin-backup binary
+
+# Keep generated and vendored assets out of GitHub language statistics.
+internal/webui/dist/** linguist-generated=true
+internal/httpapi/assets/flags/** linguist-vendored=true
+internal/httpapi/assets/logos/** linguist-vendored=true
+third_party/** linguist-vendored=true

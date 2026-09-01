@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 25
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Build embedded frontend
+        run: |
+          corepack enable
+          cd web
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm test --run
+          pnpm --registry=https://registry.npmjs.org audit --audit-level high
+      - name: Verify Go source
+        run: |
+          go test ./...
+          go vet ./...
+          go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+      - name: Build release artifacts
+        env:
+          UPDATE_PUBLIC_KEY: ${{ secrets.HOSTPIN_UPDATE_PUBLIC_KEY }}
+          RELEASE_BASE: https://github.com/${{ github.repository }}/releases/latest/download
+          VERSION: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]
+          scripts/build-release.sh
+      - name: Gate release on real Linux Agent performance
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_root="$(mktemp -d /tmp/hostpin-release-performance.XXXXXX)"
+          install -m 0755 dist/hostpin-server-linux-amd64 "$test_root/hostpin-server"
+          install -m 0755 dist/hostpin-agent-linux-amd64 "$test_root/hostpin-agent"
+          tests/e2e/linux_smoke.sh "$test_root"
+      - name: Create signed update manifest
+        env:
+          HOSTPIN_UPDATE_PUBLIC_KEY: ${{ secrets.HOSTPIN_UPDATE_PUBLIC_KEY }}
+          HOSTPIN_UPDATE_PRIVATE_KEY: ${{ secrets.HOSTPIN_UPDATE_PRIVATE_KEY }}
+        run: |
+          go run ./cmd/hostpin-manifest \
+            --version "$GITHUB_REF_NAME" \
+            --dir dist \
+            --base-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}" \
+            --output dist/update-manifest.json
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes_file="docs/releases/${GITHUB_REF_NAME}.md"
+          if [[ -f "$notes_file" ]]; then
+            gh release create "$GITHUB_REF_NAME" dist/* --notes-file "$notes_file" --title "Hostpin ${GITHUB_REF_NAME}" --verify-tag
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --title "Hostpin ${GITHUB_REF_NAME}" --verify-tag
+          fi

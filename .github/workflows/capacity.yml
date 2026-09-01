@@ -1,0 +1,77 @@
+name: Capacity
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  sqlite-and-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: hostpin_capacity
+          POSTGRES_USER: hostpin
+          POSTGRES_PASSWORD: hostpin-capacity
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hostpin -d hostpin_capacity"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.7
+          cache: true
+      - name: Build capacity binaries
+        run: |
+          mkdir -p bin
+          go build -trimpath -o bin/hostpin-server ./cmd/hostpin-server
+          go build -trimpath -o bin/hostpin-load ./tests/load
+      - name: SQLite / 100 Agents
+        shell: bash
+        run: |
+          set -euo pipefail
+          data_dir="$(mktemp -d /tmp/hostpin-capacity-sqlite.XXXXXX)"
+          HOSTPIN_LISTEN=127.0.0.1:18090 \
+          HOSTPIN_PUBLIC_URL=http://127.0.0.1:18090 \
+          HOSTPIN_DATA_DIR="$data_dir" \
+          HOSTPIN_DB_DRIVER=sqlite \
+          HOSTPIN_DB_DSN="$data_dir/hostpin.db" \
+          HOSTPIN_GEOIP_ENABLED=false \
+          ./bin/hostpin-server serve --config "$data_dir/missing.yaml" >"$data_dir/server.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+          for _ in {1..80}; do curl -fsS http://127.0.0.1:18090/readyz >/dev/null && break; sleep .25; done
+          curl -fsS -X POST http://127.0.0.1:18090/api/v1/setup -H 'Content-Type: application/json' \
+            --data '{"username":"admin","password":"capacity-test-password","enrollment_pin":"246810","site_name":"Hostpin Capacity"}' >/dev/null
+          HOSTPIN_LOAD_PIN=246810 ./bin/hostpin-load --endpoint http://127.0.0.1:18090 --nodes 100 --duration 65s
+          ! grep -E 'panic|fatal|"level":"ERROR"|level=ERROR' "$data_dir/server.log"
+      - name: PostgreSQL 16 / 1000 Agents
+        shell: bash
+        run: |
+          set -euo pipefail
+          data_dir="$(mktemp -d /tmp/hostpin-capacity-postgres.XXXXXX)"
+          HOSTPIN_LISTEN=127.0.0.1:18091 \
+          HOSTPIN_PUBLIC_URL=http://127.0.0.1:18091 \
+          HOSTPIN_DATA_DIR="$data_dir" \
+          HOSTPIN_DB_DRIVER=postgres \
+          HOSTPIN_DB_DSN='postgres://hostpin:hostpin-capacity@127.0.0.1:5432/hostpin_capacity?sslmode=disable' \
+          HOSTPIN_GEOIP_ENABLED=false \
+          ./bin/hostpin-server serve --config "$data_dir/missing.yaml" >"$data_dir/server.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+          for _ in {1..80}; do curl -fsS http://127.0.0.1:18091/readyz >/dev/null && break; sleep .25; done
+          curl -fsS -X POST http://127.0.0.1:18091/api/v1/setup -H 'Content-Type: application/json' \
+            --data '{"username":"admin","password":"capacity-test-password","enrollment_pin":"246810","site_name":"Hostpin Capacity"}' >/dev/null
+          HOSTPIN_LOAD_PIN=246810 ./bin/hostpin-load --endpoint http://127.0.0.1:18091 --nodes 1000 --duration 65s
+          ! grep -E 'panic|fatal|"level":"ERROR"|level=ERROR' "$data_dir/server.log"

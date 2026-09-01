@@ -1,0 +1,29 @@
+listen: ":8080"
+public_url: "https://monitor.example.com"
+# Optional self-hosted Agent artifact directory exposed over HTTPS.
+agent_release_base: "https://monitor.example.com/downloads"
+data_dir: "/var/lib/hostpin"
+log_level: "info"
+
+database:
+  driver: "sqlite"
+  dsn: "/var/lib/hostpin/hostpin.db"
+
+security:
+  # Keep false. This exists only for explicitly accepted legacy deployments.
+  allow_insecure_http: false
+  # Only proxy addresses listed here may supply X-Forwarded-For/X-Real-IP.
+  trusted_proxies: ["127.0.0.1/32", "::1/128"]
+  allowed_origins: []
+  enrollment_cidrs: []
+
+geoip:
+  enabled: true
+  provider: "https://ipwho.is/{ip}"
+  timeout: 4s
+  cache_ttl: 720h
+
+runtime:
+  persist_queue_size: 10000
+  offline_after: 90s
+  shutdown_timeout: 15s
