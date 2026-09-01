@@ -86,29 +86,46 @@ Agent 从该面板注册时还会出现第二次警告；无人值守 Agent 安�
 
 ## Docker Compose 安装
 
-先克隆仓库，再使用其中的 Compose 文件。镜像构建会包含 Vue 前端，宿主机无需安装
-Go、Node.js 或 pnpm。
+Docker Hub 发布的镜像已经包含服务端和内嵌 Vue 前端，同时支持 `linux/amd64` 与
+`linux/arm64`。宿主机无需安装 Go、Node.js、pnpm，也不需要克隆源码。容器以
+UID/GID `10001` 运行，所有可变数据都位于 `/var/lib/hostpin`。
+
+```sh
+docker pull chnzzh/hostpin:latest
+```
 
 SQLite（约 100 节点以内的推荐方式）：
 
 ```sh
-git clone --depth 1 https://github.com/chnzzh/hostpin.git
-cd hostpin
+mkdir hostpin && cd hostpin
+curl -fsSLo compose.yml https://raw.githubusercontent.com/chnzzh/hostpin/main/deploy/docker-compose.sqlite.yml
 HOSTPIN_PUBLIC_URL=https://monitor.example.com \
-  docker compose -f deploy/docker-compose.sqlite.yml up -d --build
+  docker compose -f compose.yml up -d
 ```
 
 SQLite 数据库、`master.key` 和主题位于 `hostpin-data` 卷。执行
 `docker compose ... down` 不会删除该卷；除非确定清空站点，不要附加 `--volumes`。
 
+如果没有域名并决定直接使用公网 IP 明文 HTTP，需要与二进制安装器一样显式接受
+风险：
+
+```sh
+HOSTPIN_PUBLIC_URL=http://203.0.113.20:8080 \
+HOSTPIN_ALLOW_INSECURE_HTTP=true \
+  docker compose -f compose.yml up -d
+```
+
+这种方式不需要域名和证书，但管理员凭据、PIN、会话及 Agent Token 都没有传输
+加密，仍推荐使用 HTTPS。
+
 可选的 PostgreSQL 16（用于规模更大的单实例站点）：
 
 ```sh
-git clone --depth 1 https://github.com/chnzzh/hostpin.git
-cd hostpin
+mkdir hostpin-postgres && cd hostpin-postgres
+curl -fsSLo compose.yml https://raw.githubusercontent.com/chnzzh/hostpin/main/deploy/docker-compose.postgres.yml
 POSTGRES_PASSWORD='请替换为足够长的随机密码' \
 HOSTPIN_PUBLIC_URL=https://monitor.example.com \
-  docker compose -f deploy/docker-compose.postgres.yml up -d --build
+  docker compose -f compose.yml up -d
 ```
 
 PostgreSQL 数据位于 `postgres-data`，Hostpin 的 `master.key` 和主题仍位于
@@ -117,10 +134,21 @@ PostgreSQL 数据位于 `postgres-data`，Hostpin 的 `master.key` 和主题仍�
 查看状态、日志和升级 SQLite Compose 部署：
 
 ```sh
-docker compose -f deploy/docker-compose.sqlite.yml ps
-docker compose -f deploy/docker-compose.sqlite.yml logs -f hostpin
-git pull --ff-only
-docker compose -f deploy/docker-compose.sqlite.yml up -d --build
+docker compose -f compose.yml ps
+docker compose -f compose.yml logs -f hostpin
+docker compose -f compose.yml pull
+docker compose -f compose.yml up -d
+```
+
+Compose 默认使用 `chnzzh/hostpin:latest`。如需固定或测试特定版本，可以设置完整
+镜像引用，例如 `HOSTPIN_IMAGE=chnzzh/hostpin:v0.1.2`。仍可从源码本地构建：
+
+```sh
+git clone https://github.com/chnzzh/hostpin.git
+cd hostpin
+docker build -t hostpin:local .
+HOSTPIN_IMAGE=hostpin:local \
+  docker compose -f deploy/docker-compose.sqlite.yml up -d
 ```
 
 ## 手动安装二进制或从源码构建

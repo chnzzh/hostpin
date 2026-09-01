@@ -68,19 +68,22 @@ curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-se
 脚本不会代为修改 DNS，也不会安装证书或反向代理。公网 HTTP 会明文传输管理员凭据、
 PIN、会话和 Agent Token，只应在明确接受风险时启用。
 
-### Docker Compose 安装
+### Docker 镜像 / Compose 安装
 
-Docker 会从仓库构建服务端和内嵌前端，宿主机无需安装 Go 或 Node.js：
+官方 `chnzzh/hostpin` 镜像同时支持 `linux/amd64` 和 `linux/arm64`，默认使用
+SQLite。宿主机无需安装 Go、Node.js，也不需要克隆源码：
 
 ```sh
-git clone --depth 1 https://github.com/chnzzh/hostpin.git
-cd hostpin
+docker pull chnzzh/hostpin:latest
+mkdir hostpin && cd hostpin
+curl -fsSLo compose.yml https://raw.githubusercontent.com/chnzzh/hostpin/main/deploy/docker-compose.sqlite.yml
 HOSTPIN_PUBLIC_URL=https://monitor.example.com \
-  docker compose -f deploy/docker-compose.sqlite.yml up -d --build
+  docker compose -f compose.yml up -d
 ```
 
-数据库、`master.key` 和主题保存在 `hostpin-data` Docker 卷中。PostgreSQL 16
-部署方式见[中文部署文档](docs/zh-CN/deployment.md)。
+数据库、`master.key` 和主题保存在 `hostpin-data` Docker 卷中。设置
+`HOSTPIN_IMAGE=chnzzh/hostpin:v0.1.2` 可以固定版本。PostgreSQL 16、公网 IP
+明文 HTTP 显式授权、备份和升级方式见[中文部署文档](docs/zh-CN/deployment.md)。
 
 ### 从源码运行
 
@@ -119,8 +122,9 @@ curl -fsSL http://localhost:8080/uninstall.sh | sh
 系统级安装将最后的 `sh` 改为 `sudo sh`。只有确定不再恢复该节点时才附加
 `--purge` 删除本地身份配置。
 
-互联网环境必须使用 HTTPS。二进制部署、Docker Compose、反向代理、备份、升级和
-数据库迁移请参阅[中文部署文档](docs/zh-CN/deployment.md)。
+互联网环境仍推荐使用 HTTPS；只有明确接受明文传输风险时才启用公网 HTTP。二进制
+部署、Docker Compose、反向代理、备份、升级和数据库迁移请参阅
+[中文部署文档](docs/zh-CN/deployment.md)。
 
 ## 中文文档
 

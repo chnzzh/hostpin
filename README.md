@@ -78,20 +78,24 @@ The installer does not configure DNS, TLS, or a reverse proxy. Public HTTP
 sends administrator credentials, PINs, sessions, and Agent tokens without
 transport encryption; use it only when that risk is explicitly acceptable.
 
-### Docker Compose
+### Docker image / Compose
 
-Docker builds the server and embedded frontend from the checked-out release;
-Go and Node.js are not required on the host:
+The official `chnzzh/hostpin` image supports `linux/amd64` and `linux/arm64`.
+SQLite remains the default, and the host does not need Go, Node.js, or a source
+checkout:
 
 ```sh
-git clone --depth 1 https://github.com/chnzzh/hostpin.git
-cd hostpin
+docker pull chnzzh/hostpin:latest
+mkdir hostpin && cd hostpin
+curl -fsSLo compose.yml https://raw.githubusercontent.com/chnzzh/hostpin/main/deploy/docker-compose.sqlite.yml
 HOSTPIN_PUBLIC_URL=https://monitor.example.com \
-  docker compose -f deploy/docker-compose.sqlite.yml up -d --build
+  docker compose -f compose.yml up -d
 ```
 
 The SQLite database, master key, and themes are kept in the `hostpin-data`
-volume. A PostgreSQL 16 Compose example is documented in
+volume. Set `HOSTPIN_IMAGE=chnzzh/hostpin:v0.1.2` to pin a release. A
+PostgreSQL 16 Compose example, direct public-IP HTTP opt-in, backup, and
+upgrade commands are documented in
 [`docs/deployment.md`](docs/deployment.md).
 
 ### Build from source

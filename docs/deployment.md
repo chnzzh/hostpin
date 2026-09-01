@@ -99,31 +99,48 @@ installer.
 
 ## Docker Compose
 
-Clone the repository before running either Compose file. The image build
-includes the Vue frontend, so Go, Node.js, and pnpm are not required on the
-host.
+Published Docker Hub images contain the server and embedded Vue frontend for
+`linux/amd64` and `linux/arm64`. Go, Node.js, pnpm, and a source checkout are
+not required on the host. The container runs as UID/GID `10001` and stores all
+mutable Hostpin data under `/var/lib/hostpin`.
+
+```sh
+docker pull chnzzh/hostpin:latest
+```
 
 SQLite (recommended for up to about 100 nodes):
 
 ```sh
-git clone --depth 1 https://github.com/chnzzh/hostpin.git
-cd hostpin
+mkdir hostpin && cd hostpin
+curl -fsSLo compose.yml https://raw.githubusercontent.com/chnzzh/hostpin/main/deploy/docker-compose.sqlite.yml
 HOSTPIN_PUBLIC_URL=https://monitor.example.com \
-  docker compose -f deploy/docker-compose.sqlite.yml up -d --build
+  docker compose -f compose.yml up -d
 ```
 
 The named `hostpin-data` volume contains the SQLite database, master key, and
 themes. `docker compose ... down` keeps that volume; do not add `--volumes`
 unless the site data is intentionally being deleted.
 
+For direct public-IP HTTP, the same explicit risk acceptance used by the
+binary installer is required:
+
+```sh
+HOSTPIN_PUBLIC_URL=http://203.0.113.20:8080 \
+HOSTPIN_ALLOW_INSECURE_HTTP=true \
+  docker compose -f compose.yml up -d
+```
+
+This mode does not require a domain or certificate, but credentials, PINs,
+sessions, and Agent tokens are not encrypted. HTTPS remains recommended.
+
 PostgreSQL 16 (optional for larger single-instance sites):
 
 ```sh
-git clone --depth 1 https://github.com/chnzzh/hostpin.git
-cd hostpin
+mkdir hostpin-postgres && cd hostpin-postgres
+curl -fsSLo compose.yml https://raw.githubusercontent.com/chnzzh/hostpin/main/deploy/docker-compose.postgres.yml
 POSTGRES_PASSWORD='replace-with-a-long-random-password' \
 HOSTPIN_PUBLIC_URL=https://monitor.example.com \
-  docker compose -f deploy/docker-compose.postgres.yml up -d --build
+  docker compose -f compose.yml up -d
 ```
 
 PostgreSQL data is stored in `postgres-data`; Hostpin's master key and themes
@@ -133,10 +150,22 @@ not add HA or Redis.
 To inspect or update a Compose deployment:
 
 ```sh
-docker compose -f deploy/docker-compose.sqlite.yml ps
-docker compose -f deploy/docker-compose.sqlite.yml logs -f hostpin
-git pull --ff-only
-docker compose -f deploy/docker-compose.sqlite.yml up -d --build
+docker compose -f compose.yml ps
+docker compose -f compose.yml logs -f hostpin
+docker compose -f compose.yml pull
+docker compose -f compose.yml up -d
+```
+
+Compose uses `chnzzh/hostpin:latest` by default. To pin or test a specific
+image, set a complete reference such as
+`HOSTPIN_IMAGE=chnzzh/hostpin:v0.1.2`. A local source build remains possible:
+
+```sh
+git clone https://github.com/chnzzh/hostpin.git
+cd hostpin
+docker build -t hostpin:local .
+HOSTPIN_IMAGE=hostpin:local \
+  docker compose -f deploy/docker-compose.sqlite.yml up -d
 ```
 
 ## Manual binary or source installation

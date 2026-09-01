@@ -15,9 +15,7 @@ services:
       retries: 10
 
   hostpin:
-    build:
-      context: ..
-    image: hostpin:latest
+    image: ${HOSTPIN_IMAGE:-chnzzh/hostpin:latest}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -29,6 +27,8 @@ services:
       HOSTPIN_DATA_DIR: /var/lib/hostpin
       HOSTPIN_DB_DRIVER: postgres
       HOSTPIN_DB_DSN: postgres://hostpin:${POSTGRES_PASSWORD}@postgres:5432/hostpin?sslmode=disable
+      HOSTPIN_GEOIP_ENABLED: ${HOSTPIN_GEOIP_ENABLED:-true}
+      HOSTPIN_ALLOW_INSECURE_HTTP: ${HOSTPIN_ALLOW_INSECURE_HTTP:-false}
     volumes:
       - hostpin-data:/var/lib/hostpin
 

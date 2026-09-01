@@ -3,6 +3,18 @@
 All notable changes to Hostpin are documented here. Hostpin follows semantic
 versioning for public releases.
 
+## Unreleased
+
+### Docker distribution
+
+- Added automated Docker Hub publication after a successful GitHub Release,
+  including `linux/amd64` and `linux/arm64` manifests, OCI provenance, SBOM,
+  semantic version tags, and a pre-push container health check.
+- Compose now pulls `chnzzh/hostpin:latest` by default while allowing a pinned
+  image through `HOSTPIN_IMAGE`; SQLite remains the default database.
+- Added direct image deployment and upgrade instructions in English and
+  Chinese.
+
 ## 0.1.2 — 2026-09-01
 
 ### Explicit public HTTP mode

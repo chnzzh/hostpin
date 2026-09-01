@@ -3,16 +3,23 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing semantic release tag to publish to Docker Hub
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
   cancel-in-progress: false
 
 jobs:
   release:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -79,3 +86,125 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --title "Hostpin ${GITHUB_REF_NAME}" --verify-tag
           fi
+
+  docker:
+    name: Publish Docker Hub image
+    needs: release
+    if: >-
+      always() &&
+      ((github.event_name == 'push' && needs.release.result == 'success') ||
+      github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+      IMAGE_NAME: ${{ vars.DOCKERHUB_IMAGE || 'chnzzh/hostpin' }}
+      DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
+          fetch-depth: 1
+      - name: Validate release and Docker Hub configuration
+        id: source
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]
+          test -n "$DOCKERHUB_USERNAME" || { echo "Missing repository variable DOCKERHUB_USERNAME" >&2; exit 1; }
+          test -n "$DOCKERHUB_TOKEN" || { echo "Missing repository secret DOCKERHUB_TOKEN" >&2; exit 1; }
+          test -n "$IMAGE_NAME" || { echo "Docker Hub image name is empty" >&2; exit 1; }
+          commit="$(git rev-parse HEAD)"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build local smoke-test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: hostpin:release-smoke
+          provenance: false
+          sbom: false
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            COMMIT=${{ steps.source.outputs.commit }}
+            RELEASE_BASE=https://github.com/${{ github.repository }}/releases/latest/download
+          cache-from: type=gha,scope=hostpin-server
+          cache-to: type=gha,mode=max,scope=hostpin-server
+      - name: Run container smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          container=hostpin-release-smoke
+          cleanup() { docker rm -f "$container" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker run -d --name "$container" \
+            -e HOSTPIN_PUBLIC_URL=http://127.0.0.1:8080 \
+            -e HOSTPIN_GEOIP_ENABLED=false \
+            hostpin:release-smoke >/dev/null
+          for _ in {1..30}; do
+            if docker exec "$container" wget -q -O - http://127.0.0.1:8080/readyz >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs "$container" >&2
+          exit 1
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ env.VERSION }}
+            type=semver,pattern={{version}},value=${{ env.VERSION }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.VERSION }}
+            type=raw,value=latest,enable=${{ !contains(env.VERSION, '-') && !contains(env.VERSION, '+') }}
+          labels: |
+            org.opencontainers.image.title=Hostpin
+            org.opencontainers.image.description=Self-hosted server monitoring with PIN enrollment and NAT-safe latency probes
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ steps.source.outputs.commit }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.documentation=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT
+      - name: Build and push multi-platform image
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            COMMIT=${{ steps.source.outputs.commit }}
+            RELEASE_BASE=https://github.com/${{ github.repository }}/releases/latest/download
+          cache-from: type=gha,scope=hostpin-server
+          cache-to: type=gha,mode=max,scope=hostpin-server
+      - name: Inspect published image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$IMAGE_NAME:$VERSION"
+          printf 'Published %s@%s\n' "$IMAGE_NAME" '${{ steps.push.outputs.digest }}'

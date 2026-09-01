@@ -167,6 +167,57 @@ jobs:
           HOSTPIN_E2E_BASE_URL=http://127.0.0.1:18085 python tests/e2e/carrier_latency.py
           ! grep -E 'panic|fatal|"level":"ERROR"|level=ERROR' "$data_dir/server.log"
 
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate Compose files
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOSTPIN_PUBLIC_URL=http://192.168.50.20:8080 \
+            docker compose -f deploy/docker-compose.sqlite.yml config --quiet
+          POSTGRES_PASSWORD=hostpin-compose-test \
+          HOSTPIN_PUBLIC_URL=http://192.168.50.20:8080 \
+            docker compose -f deploy/docker-compose.postgres.yml config --quiet
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build container image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: hostpin:ci
+          provenance: false
+          sbom: false
+          build-args: |
+            VERSION=ci
+            COMMIT=${{ github.sha }}
+            RELEASE_BASE=https://github.com/${{ github.repository }}/releases/latest/download
+          cache-from: type=gha,scope=hostpin-server
+          cache-to: type=gha,mode=max,scope=hostpin-server
+      - name: Run container health check
+        shell: bash
+        run: |
+          set -euo pipefail
+          container=hostpin-ci
+          cleanup() { docker rm -f "$container" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker run -d --name "$container" \
+            -e HOSTPIN_PUBLIC_URL=http://127.0.0.1:8080 \
+            -e HOSTPIN_GEOIP_ENABLED=false \
+            hostpin:ci >/dev/null
+          for _ in {1..30}; do
+            if docker exec "$container" wget -q -O - http://127.0.0.1:8080/readyz >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs "$container" >&2
+          exit 1
+
   cross-agent:
     runs-on: ubuntu-latest
     steps:

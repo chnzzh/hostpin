@@ -85,6 +85,7 @@ because it does not initialize host collectors.
 | Unix installer download, checksum, and argument forwarding | installer unit tests and Linux smoke through the served `install.sh` |
 | Server one-command install, URL/default-listener behavior, checksum, SQLite config, explicit public-HTTP opt-in, and upgrade preservation | `tests/e2e/server_installer.sh` in CI and `make release-check` |
 | Agent private/public HTTP confirmation and automation override | `internal/installer/install_test.go`, browser and Linux installer flows |
+| Dockerfile, direct-pull Compose files, non-root startup, and `/readyz` | CI `container` job plus the release pre-push smoke test |
 | One-line uninstall and identity retention boundary | `uninstall.sh` syntax, dangerous-pattern rejection, and Linux `--dry-run` smoke |
 | CPU/memory/disk/network/GPU collection | `internal/collector`, platform CI, Linux smoke |
 | Live WebSocket and HTTP fallback | `internal/agent` fallback tests; browser smoke, Linux smoke, and capacity load for live WebSockets |

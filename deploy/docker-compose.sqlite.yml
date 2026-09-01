@@ -1,8 +1,6 @@
 services:
   hostpin:
-    build:
-      context: ..
-    image: hostpin:latest
+    image: ${HOSTPIN_IMAGE:-chnzzh/hostpin:latest}
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -11,6 +9,7 @@ services:
       HOSTPIN_DB_DRIVER: sqlite
       HOSTPIN_DB_DSN: /var/lib/hostpin/hostpin.db
       HOSTPIN_GEOIP_ENABLED: ${HOSTPIN_GEOIP_ENABLED:-true}
+      HOSTPIN_ALLOW_INSECURE_HTTP: ${HOSTPIN_ALLOW_INSECURE_HTTP:-false}
     volumes:
       - hostpin-data:/var/lib/hostpin
     healthcheck:
