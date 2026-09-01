@@ -7,7 +7,7 @@ COPY web/ ./
 COPY internal/webui/ /src/internal/webui/
 RUN pnpm build
 
-FROM golang:1.26.7-alpine AS build
+FROM golang:1.27.0-alpine AS build
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG RELEASE_BASE=https://github.com/chnzzh/hostpin/releases/latest/download
