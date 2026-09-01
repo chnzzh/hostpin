@@ -26,14 +26,14 @@ GitHub Secret 的格式和配对关系，不匹配则终止发布。
 Docker Hub Personal Access Token。不要使用账户密码。进入 **GitHub 仓库 →
 Settings → Secrets and variables → Actions**，添加：
 
-- 仓库变量 `DOCKERHUB_USERNAME`，例如 `chnzzh`；
+- 仓库变量 `DOCKERHUB_USERNAME`，例如 `zhihancn`；
 - 仓库 Secret `DOCKERHUB_TOKEN`，内容为 Access Token；
-- 如果镜像名不是 `chnzzh/hostpin`，再添加可选仓库变量 `DOCKERHUB_IMAGE`。
+- 如果镜像名不是 `zhihancn/hostpin`，再添加可选仓库变量 `DOCKERHUB_IMAGE`。
 
 也可以使用 GitHub CLI 添加两个必需值：
 
 ```sh
-gh variable set DOCKERHUB_USERNAME --body chnzzh
+gh variable set DOCKERHUB_USERNAME --body zhihancn
 gh secret set DOCKERHUB_TOKEN
 ```
 
@@ -74,5 +74,5 @@ git push origin v0.1.0
 - 启动全新 SQLite 服务，完成首次设置，通过面板脚本分别加入普通节点和纯延迟节点，
   再验证卸载 dry-run。
 - 仅在普通用户测试主机上确认签名清单和下载地址正确后，才启用 Agent 自动更新。
-- 执行 `docker buildx imagetools inspect chnzzh/hostpin:vX.Y.Z`，确认同时包含
+- 执行 `docker buildx imagetools inspect zhihancn/hostpin:vX.Y.Z`，确认同时包含
   `linux/amd64` 和 `linux/arm64`，再启动一个临时 SQLite 容器检查 `/readyz`。

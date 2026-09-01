@@ -15,7 +15,7 @@ services:
       retries: 10
 
   hostpin:
-    image: ${HOSTPIN_IMAGE:-chnzzh/hostpin:latest}
+    image: ${HOSTPIN_IMAGE:-zhihancn/hostpin:latest}
     restart: unless-stopped
     depends_on:
       postgres:

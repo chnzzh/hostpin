@@ -80,12 +80,12 @@ transport encryption; use it only when that risk is explicitly acceptable.
 
 ### Docker image / Compose
 
-The official `chnzzh/hostpin` image supports `linux/amd64` and `linux/arm64`.
+The official `zhihancn/hostpin` image supports `linux/amd64` and `linux/arm64`.
 SQLite remains the default, and the host does not need Go, Node.js, or a source
 checkout:
 
 ```sh
-docker pull chnzzh/hostpin:latest
+docker pull zhihancn/hostpin:latest
 mkdir hostpin && cd hostpin
 curl -fsSLo compose.yml https://raw.githubusercontent.com/chnzzh/hostpin/main/deploy/docker-compose.sqlite.yml
 HOSTPIN_PUBLIC_URL=https://monitor.example.com \
@@ -93,7 +93,7 @@ HOSTPIN_PUBLIC_URL=https://monitor.example.com \
 ```
 
 The SQLite database, master key, and themes are kept in the `hostpin-data`
-volume. Set `HOSTPIN_IMAGE=chnzzh/hostpin:v0.1.2` to pin a release. A
+volume. Set `HOSTPIN_IMAGE=zhihancn/hostpin:v0.1.2` to pin a release. A
 PostgreSQL 16 Compose example, direct public-IP HTTP opt-in, backup, and
 upgrade commands are documented in
 [`docs/deployment.md`](docs/deployment.md).

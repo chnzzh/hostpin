@@ -70,11 +70,11 @@ PIN、会话和 Agent Token，只应在明确接受风险时启用。
 
 ### Docker 镜像 / Compose 安装
 
-官方 `chnzzh/hostpin` 镜像同时支持 `linux/amd64` 和 `linux/arm64`，默认使用
+官方 `zhihancn/hostpin` 镜像同时支持 `linux/amd64` 和 `linux/arm64`，默认使用
 SQLite。宿主机无需安装 Go、Node.js，也不需要克隆源码：
 
 ```sh
-docker pull chnzzh/hostpin:latest
+docker pull zhihancn/hostpin:latest
 mkdir hostpin && cd hostpin
 curl -fsSLo compose.yml https://raw.githubusercontent.com/chnzzh/hostpin/main/deploy/docker-compose.sqlite.yml
 HOSTPIN_PUBLIC_URL=https://monitor.example.com \
@@ -82,7 +82,7 @@ HOSTPIN_PUBLIC_URL=https://monitor.example.com \
 ```
 
 数据库、`master.key` 和主题保存在 `hostpin-data` Docker 卷中。设置
-`HOSTPIN_IMAGE=chnzzh/hostpin:v0.1.2` 可以固定版本。PostgreSQL 16、公网 IP
+`HOSTPIN_IMAGE=zhihancn/hostpin:v0.1.2` 可以固定版本。PostgreSQL 16、公网 IP
 明文 HTTP 显式授权、备份和升级方式见[中文部署文档](docs/zh-CN/deployment.md)。
 
 ### 从源码运行

@@ -99,7 +99,7 @@ jobs:
       contents: read
     env:
       VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
-      IMAGE_NAME: ${{ vars.DOCKERHUB_IMAGE || 'chnzzh/hostpin' }}
+      IMAGE_NAME: ${{ vars.DOCKERHUB_IMAGE || 'zhihancn/hostpin' }}
       DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
     steps:
       - name: Check out release source

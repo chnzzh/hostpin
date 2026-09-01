@@ -10,7 +10,7 @@ versioning for public releases.
 - Added automated Docker Hub publication after a successful GitHub Release,
   including `linux/amd64` and `linux/arm64` manifests, OCI provenance, SBOM,
   semantic version tags, and a pre-push container health check.
-- Compose now pulls `chnzzh/hostpin:latest` by default while allowing a pinned
+- Compose now pulls `zhihancn/hostpin:latest` by default while allowing a pinned
   image through `HOSTPIN_IMAGE`; SQLite remains the default database.
 - Added direct image deployment and upgrade instructions in English and
   Chinese.

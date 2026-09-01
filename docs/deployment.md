@@ -105,7 +105,7 @@ not required on the host. The container runs as UID/GID `10001` and stores all
 mutable Hostpin data under `/var/lib/hostpin`.
 
 ```sh
-docker pull chnzzh/hostpin:latest
+docker pull zhihancn/hostpin:latest
 ```
 
 SQLite (recommended for up to about 100 nodes):
@@ -156,9 +156,9 @@ docker compose -f compose.yml pull
 docker compose -f compose.yml up -d
 ```
 
-Compose uses `chnzzh/hostpin:latest` by default. To pin or test a specific
+Compose uses `zhihancn/hostpin:latest` by default. To pin or test a specific
 image, set a complete reference such as
-`HOSTPIN_IMAGE=chnzzh/hostpin:v0.1.2`. A local source build remains possible:
+`HOSTPIN_IMAGE=zhihancn/hostpin:v0.1.2`. A local source build remains possible:
 
 ```sh
 git clone https://github.com/chnzzh/hostpin.git

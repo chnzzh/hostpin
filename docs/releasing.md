@@ -32,12 +32,12 @@ repository → Settings → Secrets and variables → Actions**:
 - repository variable `DOCKERHUB_USERNAME`, for example `chnzzh`;
 - repository secret `DOCKERHUB_TOKEN`, containing the access token;
 - optional repository variable `DOCKERHUB_IMAGE` when the image is not
-  `chnzzh/hostpin`.
+  `zhihancn/hostpin`.
 
 With GitHub CLI, the two required values can be configured as follows:
 
 ```sh
-gh variable set DOCKERHUB_USERNAME --body chnzzh
+gh variable set DOCKERHUB_USERNAME --body zhihancn
 gh secret set DOCKERHUB_TOKEN
 ```
 
@@ -87,6 +87,6 @@ resource, checksum, or key-pair failure.
   probe-only node through the served installer, and test uninstall dry-run.
 - Enable signed Agent update only after the manifest and download URLs have
   been checked from an unprivileged test host.
-- Run `docker buildx imagetools inspect chnzzh/hostpin:vX.Y.Z` and confirm both
+- Run `docker buildx imagetools inspect zhihancn/hostpin:vX.Y.Z` and confirm both
   `linux/amd64` and `linux/arm64`, then start a disposable SQLite container and
   verify `/readyz`.

@@ -91,7 +91,7 @@ Docker Hub 发布的镜像已经包含服务端和内嵌 Vue 前端，同时支�
 UID/GID `10001` 运行，所有可变数据都位于 `/var/lib/hostpin`。
 
 ```sh
-docker pull chnzzh/hostpin:latest
+docker pull zhihancn/hostpin:latest
 ```
 
 SQLite（约 100 节点以内的推荐方式）：
@@ -140,8 +140,8 @@ docker compose -f compose.yml pull
 docker compose -f compose.yml up -d
 ```
 
-Compose 默认使用 `chnzzh/hostpin:latest`。如需固定或测试特定版本，可以设置完整
-镜像引用，例如 `HOSTPIN_IMAGE=chnzzh/hostpin:v0.1.2`。仍可从源码本地构建：
+Compose 默认使用 `zhihancn/hostpin:latest`。如需固定或测试特定版本，可以设置完整
+镜像引用，例如 `HOSTPIN_IMAGE=zhihancn/hostpin:v0.1.2`。仍可从源码本地构建：
 
 ```sh
 git clone https://github.com/chnzzh/hostpin.git
