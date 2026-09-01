@@ -100,6 +100,7 @@ jobs:
     env:
       VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
       IMAGE_NAME: ${{ vars.DOCKERHUB_IMAGE || 'zhihancn/hostpin' }}
+      DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME || 'zhihancn' }}
       DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
     steps:
       - name: Check out release source
@@ -110,13 +111,11 @@ jobs:
       - name: Validate release and Docker Hub configuration
         id: source
         env:
-          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]
-          test -n "$DOCKERHUB_USERNAME" || { echo "Missing repository variable DOCKERHUB_USERNAME" >&2; exit 1; }
           test -n "$DOCKERHUB_TOKEN" || { echo "Missing repository secret DOCKERHUB_TOKEN" >&2; exit 1; }
           test -n "$IMAGE_NAME" || { echo "Docker Hub image name is empty" >&2; exit 1; }
           commit="$(git rev-parse HEAD)"
@@ -163,7 +162,7 @@ jobs:
       - name: Log in to Docker Hub
         uses: docker/login-action@v4
         with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Generate image metadata
         id: meta

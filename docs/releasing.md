@@ -29,15 +29,15 @@ then create a Docker Hub personal access token with read/write permission. Do
 not store or use the account password. Configure these under **GitHub
 repository → Settings → Secrets and variables → Actions**:
 
-- repository variable `DOCKERHUB_USERNAME`, for example `chnzzh`;
 - repository secret `DOCKERHUB_TOKEN`, containing the access token;
+- optional repository variable `DOCKERHUB_USERNAME` when publishing from a
+  fork or a different Docker Hub account;
 - optional repository variable `DOCKERHUB_IMAGE` when the image is not
   `zhihancn/hostpin`.
 
-With GitHub CLI, the two required values can be configured as follows:
+With GitHub CLI, the required secret can be configured as follows:
 
 ```sh
-gh variable set DOCKERHUB_USERNAME --body zhihancn
 gh secret set DOCKERHUB_TOKEN
 ```
 

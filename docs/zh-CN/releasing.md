@@ -26,14 +26,14 @@ GitHub Secret 的格式和配对关系，不匹配则终止发布。
 Docker Hub Personal Access Token。不要使用账户密码。进入 **GitHub 仓库 →
 Settings → Secrets and variables → Actions**，添加：
 
-- 仓库变量 `DOCKERHUB_USERNAME`，例如 `zhihancn`；
 - 仓库 Secret `DOCKERHUB_TOKEN`，内容为 Access Token；
+- 从 Fork 或其他 Docker Hub 账户发布时，可添加仓库变量
+  `DOCKERHUB_USERNAME` 覆盖默认用户名；
 - 如果镜像名不是 `zhihancn/hostpin`，再添加可选仓库变量 `DOCKERHUB_IMAGE`。
 
-也可以使用 GitHub CLI 添加两个必需值：
+也可以使用 GitHub CLI 添加必需的 Secret：
 
 ```sh
-gh variable set DOCKERHUB_USERNAME --body zhihancn
 gh secret set DOCKERHUB_TOKEN
 ```
 
