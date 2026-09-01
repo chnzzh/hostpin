@@ -25,13 +25,14 @@ It performs the following operations:
 On a fresh installation it prompts for the public URL through `/dev/tty`. The
 suggested value is `http://<detected-private-address>:8080`; pressing Enter
 accepts it. The default listener is `0.0.0.0:8080`, so it is reachable from the
-host's networks when the firewall permits that port. Public plain-HTTP URLs
-are rejected: enter an HTTPS URL for an Internet-facing deployment.
+host's networks when the firewall permits that port. HTTPS is recommended for
+Internet-facing deployments, but a public plain-HTTP URL can be enabled after
+a separate high-risk confirmation.
 
 The installer preserves the existing configuration and data directory when it
 is rerun. It saves the previous executable as
 `/usr/local/bin/hostpin-server.rollback`. To install a specific release, add
-`--version v0.1.1`. Existing installations read the URL from their preserved
+`--version v0.1.2`. Existing installations read the URL from their preserved
 configuration and do not ask again.
 
 Automation can provide the URL without a prompt:
@@ -40,6 +41,19 @@ Automation can provide the URL without a prompt:
 curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-server.sh \
   | sudo sh -s -- --public-url https://monitor.example.com
 ```
+
+For explicitly accepted, non-interactive public HTTP deployment:
+
+```sh
+curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-server.sh \
+  | sudo sh -s -- --public-url http://203.0.113.20:8080 \
+      --allow-insecure-http
+```
+
+Without `--allow-insecure-http`, the same public HTTP URL requires an
+interactive confirmation. The generated configuration records
+`security.allow_insecure_http: true`; the setting is therefore visible and
+auditable rather than an implicit downgrade.
 
 When a reverse proxy on the same host is the only intended client, add
 `--listen 127.0.0.1:8080` to avoid exposing port 8080 directly.
@@ -65,6 +79,23 @@ monitor.example.com {
 
 Enter that exact external HTTPS origin at the installer prompt, or pass it with
 `--public-url`. After startup, open `https://monitor.example.com/setup`.
+
+### Direct public IP without a domain
+
+At the public URL prompt, enter `http://<public-ip>:8080`. The installer shows
+a warning that administrator passwords, enrollment PINs, sessions, and Agent
+tokens can be intercepted, then requires an explicit yes. No certificate is
+required after accepting that risk.
+
+When an Agent is installed from this panel, it presents a second warning before
+enrollment. `--allow-http` is the explicit non-interactive Agent override. Be
+aware that downloading and piping any script over public HTTP can itself be
+modified in transit; inspect the script or use HTTPS whenever possible.
+
+No-domain HTTPS is also possible with a publicly trusted IP-address
+certificate. [Let's Encrypt supports short-lived IPv4/IPv6 certificates](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability),
+but they require automated renewal and are not provisioned by Hostpin's
+installer.
 
 ## Docker Compose
 
@@ -239,11 +270,15 @@ irm https://monitor.example.com/uninstall.ps1 | iex
 Uninstalling does not delete the node or its history from the panel. Delete the
 offline node in **Nodes** only when that history is no longer needed.
 
-Plain HTTP enrollment is rejected for public addresses. Loopback and private
-addresses still require an interactive confirmation or `--allow-http`.
-The server likewise refuses a public-address `http://` `public_url` by default.
-`HOSTPIN_ALLOW_INSECURE_HTTP=true` is an explicit legacy escape hatch and
-should not be used for an Internet-facing deployment.
+Every plain-HTTP Agent enrollment requires an interactive confirmation or
+`--allow-http`. Public addresses receive a stronger interception warning. The
+server installer likewise requires a separate confirmation for a public HTTP
+URL, or `--allow-insecure-http` in non-interactive automation, and records the
+choice as `security.allow_insecure_http: true`.
+
+`HOSTPIN_ALLOW_INSECURE_HTTP=true` is the equivalent manual configuration
+override. HTTPS remains strongly recommended because public HTTP exposes
+credentials and telemetry to interception.
 
 ## SQLite to PostgreSQL
 

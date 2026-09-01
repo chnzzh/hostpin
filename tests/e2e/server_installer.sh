@@ -29,6 +29,7 @@ run_installer() {
   HOSTPIN_INSTALLER_ARCH=x86_64 \
   HOSTPIN_INSTALLER_DEFAULT_HOST="${HOSTPIN_INSTALLER_DEFAULT_HOST:-}" \
   HOSTPIN_INSTALLER_ACCEPT_DEFAULT="${HOSTPIN_INSTALLER_ACCEPT_DEFAULT:-}" \
+  HOSTPIN_NONINTERACTIVE="${HOSTPIN_NONINTERACTIVE:-}" \
   HOSTPIN_RELEASE_BASE="file://$release_dir" \
     sh "$project_root/scripts/install-server.sh" "$@"
 }
@@ -45,6 +46,7 @@ cmp "$artifact" "$installed"
 grep -F 'public_url: "http://192.168.50.20:8080"' "$config" >/dev/null
 grep -F 'listen: "0.0.0.0:8080"' "$config" >/dev/null
 grep -F 'driver: "sqlite"' "$config" >/dev/null
+grep -F 'allow_insecure_http: false' "$config" >/dev/null
 grep -F 'trusted_proxies: ["127.0.0.1/32", "::1/128"]' "$config" >/dev/null
 grep -F 'ExecStart=/usr/local/bin/hostpin-server serve --config /etc/hostpin/hostpin.yaml' "$unit" >/dev/null
 
@@ -68,11 +70,21 @@ if run_installer --version v1beta.2.3 >/dev/null 2>&1; then
 fi
 
 write_fixture "third Hostpin server"
-public_http_error="$(run_installer --public-url http://198.51.100.20:8080 2>&1 || true)"
-if [[ "$public_http_error" != *"plain HTTP is limited to localhost/private addresses"* ]]; then
-  echo "installer did not reject a public plain-HTTP URL" >&2
+stage_dir="$test_root/public-http-rejected"
+public_http_error="$(HOSTPIN_NONINTERACTIVE=1 run_installer --public-url http://198.51.100.20:8080 2>&1 || true)"
+if [[ "$public_http_error" != *"requires interactive confirmation or --allow-insecure-http"* ]]; then
+  echo "installer did not require confirmation for a public plain-HTTP URL" >&2
   exit 1
 fi
+
+stage_dir="$test_root/public-http-allowed"
+HOSTPIN_NONINTERACTIVE=1 run_installer \
+  --public-url http://198.51.100.20:8080 \
+  --allow-insecure-http
+grep -F 'public_url: "http://198.51.100.20:8080"' "$stage_dir/etc/hostpin/hostpin.yaml" >/dev/null
+grep -F 'allow_insecure_http: true' "$stage_dir/etc/hostpin/hostpin.yaml" >/dev/null
+HOSTPIN_NONINTERACTIVE=1 run_installer
+grep -F 'allow_insecure_http: true' "$stage_dir/etc/hostpin/hostpin.yaml" >/dev/null
 
 stage_dir="$test_root/explicit-stage"
 run_installer --public-url https://monitor.example.test

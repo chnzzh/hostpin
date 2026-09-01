@@ -54,8 +54,9 @@ SQLite 配置并启动 systemd 服务。数据位于 `/var/lib/hostpin`，配置
 
 首次安装会询问公开 URL，并以检测到的私网地址和 `8080` 端口作为默认值，直接回车
 即可。服务默认监听 `0.0.0.0:8080`，局域网内可以直接打开提示的 `/setup` 地址。
-公网部署时应输入已经配置好的 HTTPS URL；脚本不会代为修改 DNS，也不会安装证书
-或反向代理。
+公网部署仍推荐填写 HTTPS URL。如果没有域名，也可以输入
+`http://公网IP:8080`；安装器会再次提示高风险，明确确认后即可使用，不强制提供
+证书。每台 Agent 通过公网 HTTP 注册时还会独立确认一次。
 
 无人值守安装可直接传入 URL：
 
@@ -63,6 +64,9 @@ SQLite 配置并启动 systemd 服务。数据位于 `/var/lib/hostpin`，配置
 curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-server.sh \
   | sudo sh -s -- --public-url https://monitor.example.com
 ```
+
+脚本不会代为修改 DNS，也不会安装证书或反向代理。公网 HTTP 会明文传输管理员凭据、
+PIN、会话和 Agent Token，只应在明确接受风险时启用。
 
 ### Docker Compose 安装
 

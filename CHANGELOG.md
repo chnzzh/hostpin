@@ -3,6 +3,19 @@
 All notable changes to Hostpin are documented here. Hostpin follows semantic
 versioning for public releases.
 
+## 0.1.2 — 2026-09-01
+
+### Explicit public HTTP mode
+
+- Public-IP HTTP server installation is available after a dedicated high-risk
+  confirmation; non-interactive automation requires `--allow-insecure-http`.
+- The generated configuration records `allow_insecure_http: true` instead of
+  silently weakening transport policy.
+- Agents present their own second warning before public HTTP enrollment;
+  non-interactive Agent enrollment requires `--allow-http`.
+- Added English and Chinese guidance for no-domain direct-IP deployment and
+  its credential/script interception risks.
+
 ## 0.1.1 — 2026-09-01
 
 ### Deployment

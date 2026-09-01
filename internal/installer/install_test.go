@@ -1,9 +1,12 @@
 package installer
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +14,32 @@ import (
 	"github.com/chnzzh/hostpin/internal/enrollment"
 	"github.com/chnzzh/hostpin/internal/model"
 )
+
+func TestPlainHTTPAuthorizationRequiresExplicitConfirmation(t *testing.T) {
+	publicEndpoint := "http://198.51.100.20:8080"
+	if err := authorizePlainHTTP(publicEndpoint, false, nil); err == nil || !strings.Contains(err.Error(), "public plain HTTP") {
+		t.Fatalf("public HTTP without confirmation returned %v", err)
+	}
+	if err := authorizePlainHTTP(publicEndpoint, true, nil); err != nil {
+		t.Fatalf("explicit public HTTP authorization was rejected: %v", err)
+	}
+
+	yesPrompt := &prompt{reader: bufio.NewReader(strings.NewReader("yes\n")), output: io.Discard}
+	if err := authorizePlainHTTP(publicEndpoint, false, yesPrompt); err != nil {
+		t.Fatalf("interactive public HTTP confirmation was rejected: %v", err)
+	}
+	noPrompt := &prompt{reader: bufio.NewReader(strings.NewReader("no\n")), output: io.Discard}
+	if err := authorizePlainHTTP(publicEndpoint, false, noPrompt); err == nil {
+		t.Fatal("interactive public HTTP rejection was ignored")
+	}
+
+	if err := authorizePlainHTTP("http://10.0.0.4:8080", false, nil); err == nil || strings.Contains(err.Error(), "public") {
+		t.Fatalf("private HTTP policy returned %v", err)
+	}
+	if err := authorizePlainHTTP("https://monitor.example.test", false, nil); err != nil {
+		t.Fatalf("HTTPS unexpectedly required confirmation: %v", err)
+	}
+}
 
 func TestNonInteractiveMetadata(t *testing.T) {
 	t.Setenv("HOSTPIN_NODE_NAME", "edge-test")

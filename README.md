@@ -62,8 +62,10 @@ the binary without replacing either location.
 On the first run it asks for the public URL and suggests the detected private
 address on port 8080. Press Enter to accept it. Hostpin listens on
 `0.0.0.0:8080` by default, so the direct setup page is available from the
-private network. For an Internet deployment, enter the existing HTTPS URL
-instead; the installer does not configure DNS, TLS, or a reverse proxy.
+private network. HTTPS remains recommended for an Internet deployment. A
+public IP such as `http://203.0.113.20:8080` is also accepted after a separate
+high-risk confirmation, so a domain and certificate are not mandatory. Each
+Agent asks again before enrolling over public HTTP.
 
 For unattended installation, pass the URL explicitly:
 
@@ -71,6 +73,10 @@ For unattended installation, pass the URL explicitly:
 curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-server.sh \
   | sudo sh -s -- --public-url https://monitor.example.com
 ```
+
+The installer does not configure DNS, TLS, or a reverse proxy. Public HTTP
+sends administrator credentials, PINs, sessions, and Agent tokens without
+transport encryption; use it only when that risk is explicitly acceptable.
 
 ### Docker Compose
 

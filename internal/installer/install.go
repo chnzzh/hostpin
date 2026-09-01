@@ -58,18 +58,8 @@ func Run(ctx context.Context, options Options) (Result, error) {
 	}
 	parsed, _ := url.Parse(endpoint)
 	if parsed.Scheme == "http" {
-		if !enrollment.IsSafePlainHTTP(endpoint) {
-			return Result{}, errors.New("plain HTTP enrollment is limited to loopback or private-network addresses")
-		}
-		confirmed := options.AllowHTTP
-		if !confirmed && console != nil {
-			confirmed, err = console.confirm("The PIN will cross the network without TLS. Continue", false)
-			if err != nil {
-				return Result{}, err
-			}
-		}
-		if !confirmed {
-			return Result{}, errors.New("plain HTTP enrollment requires explicit confirmation or --allow-http")
+		if err := authorizePlainHTTP(endpoint, options.AllowHTTP, console); err != nil {
+			return Result{}, err
 		}
 	}
 
@@ -161,6 +151,32 @@ func Run(ctx context.Context, options Options) (Result, error) {
 		}
 	}
 	return Result{NodeID: response.NodeID, ConfigPath: configPath, BinaryPath: binaryPath, Created: response.Created}, nil
+}
+
+func authorizePlainHTTP(endpoint string, explicitlyAllowed bool, console *prompt) error {
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Scheme != "http" {
+		return nil
+	}
+	confirmed := explicitlyAllowed
+	public := !enrollment.IsSafePlainHTTP(endpoint)
+	if !confirmed && console != nil {
+		label := "The PIN will cross the private network without TLS. Continue"
+		if public {
+			label = "WARNING: this public HTTP connection can expose the PIN, node token, and metrics. Continue"
+		}
+		confirmed, err = console.confirm(label, false)
+		if err != nil {
+			return err
+		}
+	}
+	if confirmed {
+		return nil
+	}
+	if public {
+		return errors.New("public plain HTTP enrollment requires explicit confirmation or --allow-http")
+	}
+	return errors.New("plain HTTP enrollment requires explicit confirmation or --allow-http")
 }
 
 func enrollWithRetry(parent context.Context, endpoint string, request model.EnrollmentRequest) (model.EnrollmentResponse, error) {

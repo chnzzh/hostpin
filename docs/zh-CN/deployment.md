@@ -23,12 +23,12 @@ curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-se
 
 全新安装会通过 `/dev/tty` 询问公开 URL，默认建议值为
 `http://<检测到的私网地址>:8080`，直接回车即可采用。服务默认监听
-`0.0.0.0:8080`，防火墙放行后可从服务器所在网络直接访问。公网明文 HTTP 地址会被
-拒绝；互联网部署应输入 HTTPS URL。
+`0.0.0.0:8080`，防火墙放行后可从服务器所在网络直接访问。互联网部署仍推荐
+HTTPS；公网明文 HTTP 也可以在单独确认高风险后启用。
 
 重复运行时会保留配置和数据，只替换服务端程序；旧程序保存在
 `/usr/local/bin/hostpin-server.rollback`。需要固定版本时附加
-`--version v0.1.1`。已有配置会直接读取其中的 URL，不会再次询问。
+`--version v0.1.2`。已有配置会直接读取其中的 URL，不会再次询问。
 
 无人值守安装可直接传入 URL：
 
@@ -36,6 +36,17 @@ curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-se
 curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-server.sh \
   | sudo sh -s -- --public-url https://monitor.example.com
 ```
+
+明确接受风险时，公网 HTTP 也可以无人值守安装：
+
+```sh
+curl -fsSL https://github.com/chnzzh/hostpin/releases/latest/download/install-server.sh \
+  | sudo sh -s -- --public-url http://203.0.113.20:8080 \
+      --allow-insecure-http
+```
+
+不传 `--allow-insecure-http` 时，同一公网 HTTP 地址必须在终端中确认。生成的配置会
+明确写入 `security.allow_insecure_http: true`，便于审计，不会静默降低安全级别。
 
 如果只有同一台服务器上的反向代理需要访问 Hostpin，可附加
 `--listen 127.0.0.1:8080`，避免直接暴露 8080 端口。
@@ -60,6 +71,18 @@ monitor.example.com {
 
 在安装器问答中输入用户实际访问的完整 HTTPS 地址，也可以通过 `--public-url`
 传入。服务启动后打开 `https://monitor.example.com/setup`。
+
+### 无域名直接使用公网 IP
+
+在公开 URL 问答中输入 `http://<公网IP>:8080`。安装器会警告管理员密码、注册
+PIN、会话和 Agent Token 可能被截获，并要求再次输入 yes 确认。确认后无需证书。
+
+Agent 从该面板注册时还会出现第二次警告；无人值守 Agent 安装必须显式添加
+`--allow-http`。需要特别注意：通过公网 HTTP 下载并直接执行脚本时，脚本本身也可能
+在传输途中被篡改，条件允许时应先检查脚本或改用 HTTPS。
+
+无域名也可以使用受信任的 IP 地址证书。[Let's Encrypt 已支持短期 IPv4/IPv6
+证书](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability)，但必须自动续期，Hostpin 安装器目前不会自动申请。
 
 ## Docker Compose 安装
 
@@ -245,11 +268,13 @@ irm https://monitor.example.com/uninstall.ps1 | iex
 
 ## HTTP 与 HTTPS 限制
 
-公网地址不允许使用明文 HTTP 注册。Loopback 和私网地址仍需交互确认，或显式传入
-`--allow-http`。服务端同样默认拒绝公网地址的 `http://` `public_url`。
+所有明文 HTTP Agent 注册都必须交互确认，或显式传入 `--allow-http`；公网地址会
+显示更强的截获风险警告。服务端安装器面对公网 HTTP URL 时也会单独确认，无人值守
+安装则必须添加 `--allow-insecure-http`，并写入
+`security.allow_insecure_http: true`。
 
-`HOSTPIN_ALLOW_INSECURE_HTTP=true` 仅用于明确接受风险的旧环境，不能用于
-互联网部署。
+手工配置可使用等价的 `HOSTPIN_ALLOW_INSECURE_HTTP=true`。公网 HTTP 会暴露凭据和
+监控数据，仍强烈推荐使用 HTTPS。
 
 ## 从 SQLite 迁移到 PostgreSQL
 

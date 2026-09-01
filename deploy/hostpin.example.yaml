@@ -10,7 +10,7 @@ database:
   dsn: "/var/lib/hostpin/hostpin.db"
 
 security:
-  # Keep false. This exists only for explicitly accepted legacy deployments.
+  # Keep false unless the interception risk of public plain HTTP is accepted.
   allow_insecure_http: false
   # Only proxy addresses listed here may supply X-Forwarded-For/X-Real-IP.
   trusted_proxies: ["127.0.0.1/32", "::1/128"]

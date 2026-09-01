@@ -86,7 +86,7 @@ func installAgent(arguments []string) error {
 	pinFile := flags.String("pin-file", "", "read enrollment PIN from a mode-0600 file")
 	advanced := flags.Bool("advanced", false, "ask advanced node and collector questions")
 	noService := flags.Bool("no-service", false, "install files without registering a service")
-	allowHTTP := flags.Bool("allow-http", false, "confirm plain HTTP enrollment on a private address")
+	allowHTTP := flags.Bool("allow-http", false, "explicitly allow plain HTTP enrollment (high risk on public networks)")
 	probeNode := flags.Bool("probe-node", false, "install as an outbound-only latency measurement node")
 	if err := flags.Parse(arguments); err != nil {
 		if errors.Is(err, flag.ErrHelp) {

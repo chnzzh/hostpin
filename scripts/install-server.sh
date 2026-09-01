@@ -4,6 +4,8 @@ set -eu
 repository="chnzzh/hostpin"
 public_url=""
 public_url_set=0
+allow_insecure_http=0
+allow_insecure_http_set=0
 listen_address="0.0.0.0:8080"
 version=""
 destination_root="${DESTDIR:-}"
@@ -20,6 +22,9 @@ Options:
                     When omitted, the installer asks interactively. Pressing
                     Enter uses the detected private address on port 8080.
   --listen ADDRESS  HTTP listen address. Defaults to 0.0.0.0:8080.
+  --allow-insecure-http
+                    Permit a public plain-HTTP URL without an interactive
+                    warning. High risk; intended only for explicit automation.
   --version VERSION Install a specific GitHub release instead of latest.
   -h, --help        Show this help.
 
@@ -81,7 +86,25 @@ read_config_public_url() {
   awk '$1 == "public_url:" { sub(/^[^:]*:[[:space:]]*/, ""); gsub(/^"|"$/, ""); print; exit }' "$1"
 }
 
+read_config_allow_insecure_http() {
+  awk '$1 == "allow_insecure_http:" { print tolower($2); exit }' "$1"
+}
+
+confirm_public_plain_http() {
+  printf '\nWARNING: this public HTTP URL has no transport encryption.\n' > /dev/tty
+  printf 'Administrator passwords, enrollment PINs, sessions, and Agent tokens can be intercepted.\n' > /dev/tty
+  printf 'Continue and enable insecure public HTTP? (y/N): ' > /dev/tty
+  insecure_http_answer=""
+  if IFS= read -r insecure_http_answer < /dev/tty; then :; fi
+  insecure_http_answer=$(printf '%s\n' "$insecure_http_answer" | awk '{ print tolower($0) }')
+  case "$insecure_http_answer" in
+    y|yes|是) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 validate_public_url() {
+  public_http_requires_confirmation=0
   case "$public_url" in
     http://*) url_remainder=${public_url#http://}; url_scheme=http ;;
     https://*) url_remainder=${public_url#https://}; url_scheme=https ;;
@@ -101,8 +124,9 @@ validate_public_url() {
       \[*\]*) url_host=${url_authority#\[}; url_host=${url_host%%\]*} ;;
       *) url_host=${url_authority%%:*} ;;
     esac
-    is_safe_plain_http_host "$url_host" || \
-      fail "plain HTTP is limited to localhost/private addresses; use an HTTPS public URL"
+    if ! is_safe_plain_http_host "$url_host"; then
+      public_http_requires_confirmation=1
+    fi
   fi
 }
 
@@ -122,6 +146,11 @@ while [ "$#" -gt 0 ]; do
       require_value "$@"
       listen_address=$2
       shift 2
+      ;;
+    --allow-insecure-http)
+      allow_insecure_http=1
+      allow_insecure_http_set=1
+      shift
       ;;
     --version)
       require_value "$@"
@@ -177,8 +206,23 @@ for command_name in awk grep install mktemp; do
   command -v "$command_name" >/dev/null 2>&1 || fail "required command is missing: $command_name"
 done
 
-if [ -z "$public_url" ] && [ -f "$config_path" ]; then
-  public_url=$(read_config_public_url "$config_path")
+config_exists=0
+requested_public_url=$public_url
+if [ -f "$config_path" ]; then
+  config_exists=1
+  preserved_public_url=$(read_config_public_url "$config_path")
+  if [ -n "$preserved_public_url" ]; then
+    if [ "$public_url_set" -eq 1 ] && [ "$preserved_public_url" != "$requested_public_url" ]; then
+      printf 'Ignoring --public-url because the existing configuration is preserved; edit the file to change it.\n'
+    fi
+    public_url=$preserved_public_url
+  fi
+  preserved_allow_insecure_http=$(read_config_allow_insecure_http "$config_path")
+  if [ "$preserved_allow_insecure_http" = true ]; then
+    allow_insecure_http=1
+  else
+    allow_insecure_http=0
+  fi
 fi
 if [ -z "$public_url" ]; then
   default_host=$(detect_default_host)
@@ -186,7 +230,7 @@ if [ -z "$public_url" ]; then
   if [ -n "${HOSTPIN_INSTALLER_ACCEPT_DEFAULT:-}" ]; then
     [ -n "$destination_root" ] || fail "HOSTPIN_INSTALLER_ACCEPT_DEFAULT may be used only with DESTDIR"
     public_url=$suggested_public_url
-  elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  elif [ -z "${HOSTPIN_NONINTERACTIVE:-}" ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
     printf 'Public URL (HTTPS recommended) [%s]: ' "$suggested_public_url" > /dev/tty
     public_url_answer=""
     if IFS= read -r public_url_answer < /dev/tty; then :; fi
@@ -200,6 +244,19 @@ if printf '%s\n%s\n' "$public_url" "$listen_address" | grep -q '[[:space:]"\\]';
   fail "URL and listen address must not contain whitespace, quotes, or backslashes"
 fi
 validate_public_url
+if [ "$public_http_requires_confirmation" -eq 1 ]; then
+  if [ "$config_exists" -eq 1 ]; then
+    [ "$allow_insecure_http" -eq 1 ] || \
+      fail "the preserved public HTTP configuration must set security.allow_insecure_http to true"
+  elif [ "$allow_insecure_http_set" -eq 1 ]; then
+    allow_insecure_http=1
+  elif [ -z "${HOSTPIN_NONINTERACTIVE:-}" ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    confirm_public_plain_http || fail "public HTTP installation was not confirmed"
+    allow_insecure_http=1
+  else
+    fail "public HTTP requires interactive confirmation or --allow-insecure-http"
+  fi
+fi
 if [ -n "$version" ]; then
   printf '%s\n' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$' || \
     fail "--version must be a semantic version such as v1.2.3"
@@ -295,6 +352,10 @@ install -m 0755 "$temporary_directory/$artifact" "$binary_path.new"
 mv -f "$binary_path.new" "$binary_path"
 
 if [ ! -f "$config_path" ]; then
+  allow_insecure_http_yaml=false
+  if [ "$allow_insecure_http" -eq 1 ]; then
+    allow_insecure_http_yaml=true
+  fi
   cat > "$config_path" <<EOF
 listen: "$listen_address"
 public_url: "$public_url"
@@ -306,7 +367,7 @@ database:
   dsn: "/var/lib/hostpin/hostpin.db"
 
 security:
-  allow_insecure_http: false
+  allow_insecure_http: $allow_insecure_http_yaml
   trusted_proxies: ["127.0.0.1/32", "::1/128"]
   allowed_origins: []
   enrollment_cidrs: []
@@ -330,9 +391,6 @@ else
   printf 'Preserving existing configuration: %s\n' "$config_path"
   preserved_public_url=$(read_config_public_url "$config_path")
   if [ -n "$preserved_public_url" ]; then
-    if [ "$public_url_set" -eq 1 ] && [ "$preserved_public_url" != "$public_url" ]; then
-      printf 'Ignoring --public-url because the existing configuration is preserved; edit the file to change it.\n'
-    fi
     public_url=$preserved_public_url
   fi
 fi
@@ -386,5 +444,11 @@ printf '  Config:  %s\n' "$config_path"
 printf '  Data:    %s\n' "$data_directory"
 printf '  Status:  systemctl status hostpin-server\n'
 case "$public_url" in
-  http://*) printf '  Note: plain HTTP is for localhost/private setup only; use HTTPS before Internet enrollment.\n' ;;
+  http://*)
+    if [ "$allow_insecure_http" -eq 1 ]; then
+      printf '  WARNING: public plain HTTP is enabled; credentials and Agent tokens are not encrypted.\n'
+    else
+      printf '  Note: plain HTTP is intended for localhost/private networks.\n'
+    fi
+    ;;
 esac
