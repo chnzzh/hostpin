@@ -18,7 +18,7 @@ COPY . .
 COPY --from=web /src/internal/webui/dist /src/internal/webui/dist
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/chnzzh/hostpin/internal/buildinfo.Version=${VERSION} -X github.com/chnzzh/hostpin/internal/buildinfo.Commit=${COMMIT} -X github.com/chnzzh/hostpin/internal/buildinfo.ReleaseBase=${RELEASE_BASE}" -o /out/hostpin-server ./cmd/hostpin-server
 
-FROM alpine:3.23
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata && addgroup -S -g 10001 hostpin && adduser -S -D -H -u 10001 -G hostpin hostpin && mkdir -p /var/lib/hostpin && chown hostpin:hostpin /var/lib/hostpin
 COPY --from=build /out/hostpin-server /usr/local/bin/hostpin-server
 USER hostpin
