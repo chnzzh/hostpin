@@ -775,7 +775,7 @@ def main() -> int:
             mobile.screenshot(path="/tmp/hostpin-mobile.png", full_page=True)
             mobile.goto(f"{BASE_URL}/latency", wait_until="networkidle")
             mobile.locator(".latency-mobile-matrix").wait_for()
-            mobile_route = mobile.locator(".latency-mobile-matrix").get_by_role("button", name="browser-router to browser-edge latency")
+            mobile_route = mobile.locator(".latency-mobile-matrix").get_by_role("button", name="browser-router to browser-edge (IPv4 TCP) latency")
             mobile_route.wait_for()
             mobile_route_text = mobile_route.inner_text().upper()
             if "NO SAMPLE" in mobile_route_text or "% LOSS" not in mobile_route_text:
