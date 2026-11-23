@@ -5,14 +5,52 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chnzzh/hostpin/internal/model"
 	"github.com/chnzzh/hostpin/internal/store"
 	"github.com/go-chi/chi/v5"
 )
+
+const latencyOverviewCacheTTL = 3 * time.Second
+
+type latencyCacheEntry struct {
+	overview  model.LatencyOverview
+	expiresAt time.Time
+}
+
+type latencyOverviewCall struct {
+	done chan struct{}
+	gen  uint64
+	val  model.LatencyOverview
+	err  error
+}
+
+func latencyCacheIndex(authenticated bool) int {
+	if authenticated {
+		return 1
+	}
+	return 0
+}
+
+func cloneLatencyOverview(overview model.LatencyOverview) model.LatencyOverview {
+	overview.ProbeNodes = slices.Clone(overview.ProbeNodes)
+	overview.Targets = slices.Clone(overview.Targets)
+	overview.Latest = slices.Clone(overview.Latest)
+	return overview
+}
+
+func (a *API) invalidateLatencyCache() {
+	a.latencyCacheMu.Lock()
+	a.latencyCacheGen++
+	a.latencyCache = [2]latencyCacheEntry{}
+	a.latencyOverviewCalls = [2]*latencyOverviewCall{}
+	a.latencyCacheMu.Unlock()
+}
 
 func (a *API) handlePublicLatency(w http.ResponseWriter, r *http.Request) {
 	authenticated, err := a.publicAccess(r)
@@ -33,6 +71,67 @@ func (a *API) handlePublicLatency(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) latencyOverview(ctx context.Context, authenticated bool) (model.LatencyOverview, error) {
+	if err := ctx.Err(); err != nil {
+		return model.LatencyOverview{}, err
+	}
+	idx := latencyCacheIndex(authenticated)
+	now := time.Now()
+
+	a.latencyCacheMu.Lock()
+	if cached := a.latencyCache[idx]; now.Before(cached.expiresAt) {
+		overview := cloneLatencyOverview(cached.overview)
+		a.latencyCacheMu.Unlock()
+		return overview, nil
+	}
+	if call := a.latencyOverviewCalls[idx]; call != nil {
+		a.latencyCacheMu.Unlock()
+		select {
+		case <-call.done:
+			return cloneLatencyOverview(call.val), call.err
+		case <-ctx.Done():
+			return model.LatencyOverview{}, ctx.Err()
+		}
+	}
+	call := &latencyOverviewCall{
+		done: make(chan struct{}),
+		gen:  a.latencyCacheGen,
+	}
+	a.latencyOverviewCalls[idx] = call
+	a.latencyCacheMu.Unlock()
+
+	completed := false
+	finish := func() {
+		a.latencyCacheMu.Lock()
+		if a.latencyOverviewCalls[idx] == call {
+			a.latencyOverviewCalls[idx] = nil
+		}
+		if !completed && call.err == nil {
+			call.err = errors.New("latency overview aborted")
+		}
+		if completed && call.err == nil && a.latencyCacheGen == call.gen {
+			a.latencyCache[idx] = latencyCacheEntry{
+				overview:  cloneLatencyOverview(call.val),
+				expiresAt: time.Now().Add(latencyOverviewCacheTTL),
+			}
+		}
+		a.latencyCacheMu.Unlock()
+		close(call.done)
+	}
+	var finishOnce sync.Once
+	defer func() { finishOnce.Do(finish) }()
+
+	loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	call.val, call.err = a.loadLatencyOverview(loadCtx, authenticated)
+	completed = true
+	finishOnce.Do(finish)
+	if err := ctx.Err(); err != nil {
+		return model.LatencyOverview{}, err
+	}
+	return cloneLatencyOverview(call.val), call.err
+}
+
+func (a *API) loadLatencyOverview(ctx context.Context, authenticated bool) (model.LatencyOverview, error) {
 	now := time.Now().UTC()
 	probeNodes, err := a.store.ListLatencyNodes(ctx, authenticated)
 	if err != nil {
@@ -274,6 +373,7 @@ func (a *API) handleAdminUpdateLatencyNode(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "update_failed", "could not update measurement node")
 		return
 	}
+	a.invalidateLatencyCache()
 	admin := adminFromContext(r.Context())
 	_ = a.store.AppendAudit(r.Context(), admin.Username, "latency.node.update", node.ID, update.Name, time.Now().UTC())
 	updated, _ := a.store.GetNode(r.Context(), node.ID)
@@ -293,6 +393,7 @@ func (a *API) handleAdminDeleteLatencyNode(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusInternalServerError, "update_failed", "could not disable latency measurement")
 			return
 		}
+		a.invalidateLatencyCache()
 		a.revokeAgentStreams(id)
 		admin := adminFromContext(r.Context())
 		_ = a.store.AppendAudit(r.Context(), admin.Username, "node.latency.disable", id, node.Name, time.Now().UTC())
@@ -303,6 +404,7 @@ func (a *API) handleAdminDeleteLatencyNode(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "delete_failed", "could not delete measurement node")
 		return
 	}
+	a.invalidateLatencyCache()
 	a.revokeAgentStreams(id)
 	admin := adminFromContext(r.Context())
 	_ = a.store.AppendAudit(r.Context(), admin.Username, "latency.node.delete", id, node.Name, time.Now().UTC())
@@ -380,6 +482,7 @@ func (a *API) handleAdminSaveLatencyTarget(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "store_error", "could not save latency target")
 		return
 	}
+	a.invalidateLatencyCache()
 	admin := adminFromContext(r.Context())
 	_ = a.store.AppendAudit(r.Context(), admin.Username, "latency.target.save", strconv.FormatInt(saved.ID, 10), targetNode.Name, time.Now().UTC())
 	status := http.StatusOK
@@ -415,6 +518,7 @@ func (a *API) handleAdminDeleteLatencyTarget(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "store_error", "could not delete latency target")
 		return
 	}
+	a.invalidateLatencyCache()
 	admin := adminFromContext(r.Context())
 	_ = a.store.AppendAudit(r.Context(), admin.Username, "latency.target.delete", strconv.FormatInt(id, 10), "", time.Now().UTC())
 	w.WriteHeader(http.StatusNoContent)

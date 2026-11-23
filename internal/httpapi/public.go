@@ -372,11 +372,22 @@ func (a *API) handlePublicLive(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case <-revalidate.C:
-			currentAuthenticated, accessErr := a.publicAccess(r)
+			revalCtx, revalCancel := contextWithTimeout(ctx, 3*time.Second)
+			currentAuthenticated, accessErr := a.publicAccess(r.WithContext(revalCtx))
+			if ctx.Err() == nil && (errors.Is(accessErr, context.DeadlineExceeded) || errors.Is(revalCtx.Err(), context.DeadlineExceeded)) {
+				revalCancel()
+				continue
+			}
 			if accessErr != nil || currentAuthenticated != authenticated {
+				revalCancel()
 				return
 			}
-			currentAllowed, listErr := a.publicLiveNodeIDs(ctx, currentAuthenticated)
+			currentAllowed, listErr := a.publicLiveNodeIDs(revalCtx, currentAuthenticated)
+			timedOut := ctx.Err() == nil && (errors.Is(listErr, context.DeadlineExceeded) || errors.Is(revalCtx.Err(), context.DeadlineExceeded))
+			revalCancel()
+			if timedOut {
+				continue
+			}
 			if listErr != nil || !slices.Equal(currentAllowed, allowed) {
 				return
 			}

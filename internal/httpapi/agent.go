@@ -94,6 +94,7 @@ func (a *API) handleEnrollment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.limiter.Success(ip)
+	a.invalidateLatencyCache()
 	request.PIN, request.Token = "", ""
 	_ = a.store.AppendAudit(r.Context(), "enrollment", "node.enroll", record.Node.ID, record.Node.Name+" from "+ip, now)
 	writeJSON(w, map[bool]int{true: http.StatusCreated, false: http.StatusOK}[record.Created], model.EnrollmentResponse{
@@ -292,10 +293,13 @@ func (a *API) acceptSample(ctx context.Context, node model.Node, cfg model.Agent
 
 func (a *API) acceptProbe(node model.Node, result model.ProbeResult, now time.Time) {
 	result.NodeID, result.ReceivedAt = node.ID, now
-	if a.recordEnabled.Load() {
+	if a.recordEnabled.Load() && a.persister != nil {
 		a.persister.EnqueueProbe(result)
 	}
-	a.alerts.EvaluateProbe(node, result)
+	a.invalidateLatencyCache()
+	if a.alerts != nil {
+		a.alerts.EvaluateProbe(node, result)
+	}
 }
 
 func (a *API) refreshAutomaticLocation(ctx context.Context, node *model.Node, sourceIP string, now time.Time) {
@@ -315,6 +319,7 @@ func (a *API) refreshAutomaticLocation(ctx context.Context, node *model.Node, so
 	node.Region = firstNonEmpty(node.Region, location.Region, location.City)
 	node.Latitude, node.Longitude = &location.Latitude, &location.Longitude
 	if err := a.store.UpdateNode(ctx, *node); err == nil {
+		a.invalidateLatencyCache()
 		_ = a.store.AppendAudit(ctx, "agent", "node.location.auto", node.ID, "public IP changed", now)
 	}
 }
@@ -386,16 +391,27 @@ func (a *API) handleAgentStream(w http.ResponseWriter, r *http.Request) {
 		var refreshedTasks []model.ProbeTask
 		if now.Sub(lastConfigRefresh) >= 15*time.Second {
 			lastConfigRefresh = now
-			if currentNode, nodeErr := a.store.GetNode(ctx, node.ID); nodeErr == nil {
+			refreshCtx, refreshCancel := context.WithTimeout(ctx, 2*time.Second)
+			currentNode, nodeErr := a.store.GetNode(refreshCtx, node.ID)
+			if errors.Is(nodeErr, store.ErrNotFound) {
+				refreshCancel()
+				return
+			}
+			if nodeErr == nil {
 				node = currentNode
 			}
-			if currentConfig, configErr := a.store.AgentConfig(ctx, node.ID); configErr == nil {
-				cfg = currentConfig
+			if refreshCtx.Err() == nil {
+				if currentConfig, configErr := a.store.AgentConfig(refreshCtx, node.ID); configErr == nil {
+					cfg = currentConfig
+				}
 			}
-			if current, taskErr := a.store.ListProbeTasks(ctx, node.ID); taskErr == nil {
-				tasks = current
-				refreshedTasks = tasks
+			if refreshCtx.Err() == nil {
+				if current, taskErr := a.store.ListProbeTasks(refreshCtx, node.ID); taskErr == nil {
+					tasks = current
+					refreshedTasks = tasks
+				}
 			}
+			refreshCancel()
 		}
 		switch frame.Type {
 		case "hello":
