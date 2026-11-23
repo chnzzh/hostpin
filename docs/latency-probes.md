@@ -87,15 +87,44 @@ In **Admin → Latency nodes**:
 
 1. Confirm the measurement node is online and choose public or private
    visibility.
-2. Add a monitored server as a target.
-3. Choose ICMP or TCP, target address, samples per round, interval, and timeout.
-4. Choose whether the route may appear on the public matrix.
+2. Click **Add target** and select a monitored server.
+3. Choose the IP stack (**Dual stack (IPv4 + IPv6)**, **IPv4 only**, or
+   **IPv6 only**) and protocol (**ICMP + TCP**, **ICMP Ping**, or
+   **TCP Connect**).
+4. Review or customize the **IPv4 address**, **IPv6 address**, **TCP port**
+   (default `443`), samples per round, interval, timeout, and public matrix
+   visibility.
 
-One latency target is attached to each monitored server and distributed to all
-connected measurement points, including probe-only nodes and regular nodes
-with latency measurement enabled. Three samples per round is the default.
-Hostpin stores the average of successful samples and the percentage lost; a
-fully failed round is recorded as 100% loss.
+Each monitored server can hold up to **four** independent latency targets at
+the same time, keyed by `(server, IP stack, protocol)`:
+
+- `IPv4 · ICMP`
+- `IPv4 · TCP`
+- `IPv6 · ICMP`
+- `IPv6 · TCP`
+
+When opening the drawer or switching servers, Hostpin pre-fills the IPv4 and
+IPv6 address fields from the server's reported addresses and defaults the IP
+stack selector to **Dual stack** if both addresses are present, **IPv6 only**
+if only an IPv6 address is present, or **IPv4 only** otherwise. You can still
+select **Dual stack** and **ICMP + TCP** to generate all four targets in one
+click:
+
+- For **ICMP**, addresses are normalized without a port (brackets around an
+  IPv6 literal such as `[2001:db8::1]` are stripped automatically).
+- For **TCP**, the configured **TCP port** is appended automatically
+  (`host:port` for IPv4/hostnames and `[ipv6]:port` for IPv6 literals), unless
+  you enter an explicit `host:port` or `[ipv6]:port`.
+- When creating multiple combinations in one submission, any combination that
+  already exists for that server is skipped automatically so remaining
+  combinations are still created cleanly.
+- Each target can later be edited or deleted individually (with its stack and
+  protocol badge shown alongside the target address in the target table).
+
+All enabled targets are distributed to all connected measurement points,
+including probe-only nodes and regular nodes with latency measurement enabled.
+Three samples per round is the default. Hostpin stores the average of successful
+samples and the percentage lost; a fully failed round is recorded as 100% loss.
 
 The target address does not have to equal the server's detected public IP, but
 v1 distributes the same address to every Probe Node. A site containing only
@@ -104,7 +133,21 @@ deployment mixing public and home Probe Nodes should use a public hostname or
 IP reachable from all points; unreachable points will record a failure.
 Separate per-Probe address overrides are intentionally deferred beyond v1.
 
-## Public and private data
+## Public matrix filtering and private data
+
+On `/latency`, visitors can filter the matrix by **IP stack** (`All`, `IPv4`,
+`IPv6`) and **Protocol** (`All`, `ICMP`, `TCP`):
+
+- Both the matrix rows (desktop table and mobile probe-grouped cards) and the
+  top summary metrics (**Healthy paths** and **Current mean RTT**) reflect the
+  active filters.
+- If a filter combination matches no configured targets, the matrix shows a
+  clear empty state with a **Reset filters** action.
+- Every path is identified and queried by its `task_id`, so IPv4/IPv6 and
+  ICMP/TCP histories remain strictly separated. When the selected `Probe →
+  Server` pair has multiple configured paths, quick sibling tabs in the route
+  history header switch between its `IPv4`/`IPv6` and `ICMP`/`TCP` curves in
+  one click.
 
 Private measurement-node visibility and the node's hidden flag are the same setting.
 A route appears on `/latency` only when all three conditions hold:
@@ -119,9 +162,15 @@ points, private targets, exact addresses, and errors.
 
 ## Platform notes
 
-- ICMP uses the local `ping` program. Install it on minimal OpenWrt images and
-  ensure the Agent service account is allowed to run it.
-- TCP targets use `host:port`; use brackets for IPv6, such as `[2001:db8::1]:443`.
+- ICMP uses the local `ping` (or `ping6`) program and pins the address family
+  to the target's configured IP stack (`-4` / `-6` on Linux/Windows/FreeBSD,
+  with `ping6` support on macOS, FreeBSD, and BusyBox builds without `ping -6`).
+  Install `ping` / `ping6` on minimal OpenWrt images and ensure the Agent
+  service account is allowed to run it.
+- TCP targets dial `tcp4` or `tcp6` according to the configured stack and use
+  `host:port` format; wrap IPv6 literals in brackets, such as `[2001:db8::1]:443`.
+  When using a dual-stack hostname, pinning `IPv4` or `IPv6` ensures the Agent
+  measures that specific address family rather than falling back silently.
 - TCP RTT is connection-establishment time and is often the best choice when
   ICMP is filtered.
 - Probe-only mode does not initialize Hostpin's CPU, disk, GPU, or network
