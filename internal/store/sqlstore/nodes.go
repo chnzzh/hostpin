@@ -296,11 +296,62 @@ func (s *SQLStore) UpdateTrafficCorrection(ctx context.Context, nodeID string, r
 }
 
 func (s *SQLStore) DeleteNode(ctx context.Context, id string) error {
+	var exists int
+	if err := s.readDB.QueryRowContext(ctx, s.q(`SELECT 1 FROM nodes WHERE id = ?`), id).Scan(&exists); err != nil {
+		return mapSQLError(err)
+	}
+	if s.driver == "sqlite" {
+		taskRows, err := s.readDB.QueryContext(ctx, s.q(`SELECT id FROM probe_tasks WHERE purpose = 'latency' AND target_node_id = ?`), id)
+		if err != nil {
+			return err
+		}
+		taskIDs := make([]int64, 0)
+		for taskRows.Next() {
+			var taskID int64
+			if err := taskRows.Scan(&taskID); err != nil {
+				taskRows.Close()
+				return err
+			}
+			taskIDs = append(taskIDs, taskID)
+		}
+		if err := taskRows.Err(); err != nil {
+			taskRows.Close()
+			return err
+		}
+		taskRows.Close()
+
+		var totalDeleted int64
+		for _, taskID := range taskIDs {
+			deleted, err := s.deleteRowsBatched(ctx, "probe_results", "task_id", taskID, sqliteRetentionBatchSize)
+			if err != nil {
+				return err
+			}
+			totalDeleted += deleted
+		}
+		for _, table := range []string{"probe_results", "metrics_raw", "metrics_5m", "metrics_1h", "alert_events"} {
+			deleted, err := s.deleteRowsBatched(ctx, table, "node_id", id, sqliteRetentionBatchSize)
+			if err != nil {
+				return err
+			}
+			totalDeleted += deleted
+		}
+		if totalDeleted >= sqliteRetentionBatchSize && s.sqliteFile {
+			_, _ = s.db.ExecContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`)
+		}
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if s.driver != "sqlite" {
+		for _, table := range []string{"metrics_5m", "metrics_1h"} {
+			if _, err := tx.ExecContext(ctx, s.q(`DELETE FROM `+table+` WHERE node_id = ?`), id); err != nil {
+				return err
+			}
+		}
+	}
 	if _, err := tx.ExecContext(ctx, s.q(`DELETE FROM probe_tasks WHERE purpose = 'latency' AND target_node_id = ?`), id); err != nil {
 		return err
 	}

@@ -144,6 +144,7 @@ func (a *API) handleAdminDeleteNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "node_not_found", "node was not found")
 		return
 	} else if err != nil {
+		a.logger.Error("delete node", "node", id, "error", err)
 		writeError(w, http.StatusInternalServerError, "delete_failed", "could not delete node")
 		return
 	}

@@ -401,6 +401,7 @@ func (a *API) handleAdminDeleteLatencyNode(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err := a.store.DeleteNode(r.Context(), id); err != nil {
+		a.logger.Error("delete measurement node", "node", id, "error", err)
 		writeError(w, http.StatusInternalServerError, "delete_failed", "could not delete measurement node")
 		return
 	}
@@ -515,6 +516,7 @@ func (a *API) handleAdminDeleteLatencyTarget(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err := a.store.DeleteProbeTask(r.Context(), id); err != nil {
+		a.logger.Error("delete latency target", "task_id", id, "error", err)
 		writeError(w, http.StatusInternalServerError, "store_error", "could not delete latency target")
 		return
 	}

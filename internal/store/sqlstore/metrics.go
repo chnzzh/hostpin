@@ -371,6 +371,39 @@ func (s *SQLStore) ApplyRetention(ctx context.Context, settings model.SiteSettin
 	return nil
 }
 
+func (s *SQLStore) deleteRowsBatched(ctx context.Context, table, column string, value any, batchSize int64) (int64, error) {
+	if s.driver != "sqlite" {
+		result, err := s.db.ExecContext(ctx, s.q(`DELETE FROM `+table+` WHERE `+column+` = ?`), value)
+		if err != nil {
+			return 0, err
+		}
+		affected, _ := result.RowsAffected()
+		return affected, nil
+	}
+	if batchSize <= 0 {
+		batchSize = sqliteRetentionBatchSize
+	}
+	query := fmt.Sprintf(`DELETE FROM %s WHERE rowid IN (SELECT rowid FROM %s WHERE %s = ? LIMIT %d)`, table, table, column, batchSize)
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		result, err := s.db.ExecContext(ctx, query, value)
+		if err != nil {
+			return total, err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += affected
+		if affected < batchSize {
+			return total, nil
+		}
+	}
+}
+
 func (s *SQLStore) deleteExpiredRows(ctx context.Context, table string, cutoff time.Time, batchSize int64) error {
 	cutoffMS := millis(cutoff)
 	if s.driver != "sqlite" {

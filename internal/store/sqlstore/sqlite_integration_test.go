@@ -703,3 +703,194 @@ func TestSQLiteBatchPersistenceRollupAndRetention(t *testing.T) {
 		t.Fatalf("expired probe_results were not cleaned up: %d %v", oldProbes, err)
 	}
 }
+
+func TestDeleteNodeAndProbeTaskBatchedCleanup(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "delete-perf.db")
+	repository, err := Open(ctx, config.DatabaseConfig{Driver: "sqlite", DSN: dbPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repository.Close()
+
+	// 1. Verify migration 011 indexes exist.
+	checkIndex := func(tbl, idx string) {
+		t.Helper()
+		var count int
+		if err := repository.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND name = ?`, tbl, idx).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("expected index %s on %s, count=%d err=%v", idx, tbl, count, err)
+		}
+	}
+	checkIndex("probe_results", "idx_probe_results_task_ts")
+	checkIndex("alert_events", "idx_alert_events_node")
+
+	// Missing node / task return store.ErrNotFound.
+	if err := repository.DeleteNode(ctx, "missing-node"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("DeleteNode(missing) = %v, want ErrNotFound", err)
+	}
+	if err := repository.DeleteProbeTask(ctx, 999999); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("DeleteProbeTask(missing) = %v, want ErrNotFound", err)
+	}
+
+	now := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	targetRes, err := repository.EnrollNode(ctx, store.EnrollParams{
+		Request: model.EnrollmentRequest{
+			InstallID: uuid.NewString(), Token: "hpa_del_target.secret", Role: model.NodeRoleMonitor,
+			Metadata: model.EnrollmentMetadata{Name: "target-node"}, Config: model.DefaultAgentConfig(),
+		},
+		NodeID: uuid.NewString(), TokenID: "del_target", TokenHash: "hash1", Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keeperRes, err := repository.EnrollNode(ctx, store.EnrollParams{
+		Request: model.EnrollmentRequest{
+			InstallID: uuid.NewString(), Token: "hpa_del_keeper.secret", Role: model.NodeRoleMonitor,
+			Metadata: model.EnrollmentMetadata{Name: "keeper-node"}, Config: model.DefaultAgentConfig(),
+		},
+		NodeID: uuid.NewString(), TokenID: "del_keeper", TokenHash: "hash2", Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeRes, err := repository.EnrollNode(ctx, store.EnrollParams{
+		Request: model.EnrollmentRequest{
+			InstallID: uuid.NewString(), Token: "hpa_del_probe.secret", Role: model.NodeRoleProbe,
+			Metadata: model.EnrollmentMetadata{Name: "probe-node"}, Config: model.DefaultAgentConfig(),
+		},
+		NodeID: uuid.NewString(), TokenID: "del_probe", TokenHash: "hash3", Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	latencyTask, err := repository.SaveProbeTask(ctx, model.ProbeTask{
+		Name: "target-latency", Type: model.ProbeICMP, Target: "1.1.1.1",
+		IntervalSeconds: 30, TimeoutSeconds: 5, Purpose: model.ProbePurposeLatency,
+		RunOn: model.NodeRoleProbe, TargetNodeID: targetRes.Node.ID, Public: true, Samples: 3, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keeperTask, err := repository.SaveProbeTask(ctx, model.ProbeTask{
+		Name: "keeper-latency", Type: model.ProbeICMP, Target: "8.8.8.8",
+		IntervalSeconds: 30, TimeoutSeconds: 5, Purpose: model.ProbePurposeLatency,
+		RunOn: model.NodeRoleProbe, TargetNodeID: keeperRes.Node.ID, Public: true, Samples: 3, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	customTask, err := repository.SaveProbeTask(ctx, model.ProbeTask{
+		Name: "custom-probe", Type: model.ProbeTCP, Target: "1.1.1.1:443",
+		IntervalSeconds: 60, TimeoutSeconds: 5, Purpose: model.ProbePurposeCustom,
+		RunOn: model.NodeRoleMonitor, Samples: 1, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Test deleteRowsBatched across multiple batches while preserving other nodes/tasks.
+	batchProbes := make([]model.ProbeResult, 0, 12)
+	for i := 0; i < 11; i++ {
+		at := now.Add(time.Duration(i) * time.Second)
+		batchProbes = append(batchProbes, model.ProbeResult{
+			NodeID: targetRes.Node.ID, TaskID: customTask.ID, ReceivedAt: at, CollectedAt: at, Success: true, LatencyMS: 10,
+		})
+	}
+	batchProbes = append(batchProbes, model.ProbeResult{
+		NodeID: keeperRes.Node.ID, TaskID: customTask.ID, ReceivedAt: now, CollectedAt: now, Success: true, LatencyMS: 12,
+	})
+	if err := repository.SaveProbeResultsBatch(ctx, batchProbes); err != nil {
+		t.Fatal(err)
+	}
+	deletedBatch, err := repository.deleteRowsBatched(ctx, "probe_results", "node_id", targetRes.Node.ID, 4)
+	if err != nil || deletedBatch != 11 {
+		t.Fatalf("deleteRowsBatched deleted=%d err=%v, want 11 nil", deletedBatch, err)
+	}
+	var keeperCustomCount int
+	if err := repository.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM probe_results WHERE task_id = ? AND node_id = ?`, customTask.ID, keeperRes.Node.ID).Scan(&keeperCustomCount); err != nil || keeperCustomCount != 1 {
+		t.Fatalf("keeper custom probe result was affected: count=%d err=%v", keeperCustomCount, err)
+	}
+
+	// 3. Test DeleteProbeTask removes task and its probe_results while keeping other tasks.
+	if err := repository.SaveProbeResult(ctx, model.ProbeResult{
+		NodeID: targetRes.Node.ID, TaskID: customTask.ID, ReceivedAt: now.Add(time.Minute), CollectedAt: now.Add(time.Minute), Success: true, LatencyMS: 15,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.DeleteProbeTask(ctx, customTask.ID); err != nil {
+		t.Fatalf("DeleteProbeTask failed: %v", err)
+	}
+	var remainingCustom int
+	if err := repository.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM probe_results WHERE task_id = ?`, customTask.ID).Scan(&remainingCustom); err != nil || remainingCustom != 0 {
+		t.Fatalf("expected 0 probe_results after DeleteProbeTask, got %d err=%v", remainingCustom, err)
+	}
+
+	// 4. Populate targetNode metrics (raw, 5m, 1h), alert_events, own probe_results, AND probe_results recorded by probeNode for targetNode's latencyTask.
+	if err := repository.SaveMetricsBatch(ctx, []model.MetricSample{
+		{NodeID: targetRes.Node.ID, Sequence: 1, ReceivedAt: now, CollectedAt: now, CPU: 25},
+		{NodeID: keeperRes.Node.ID, Sequence: 1, ReceivedAt: now, CollectedAt: now, CPU: 35},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Rollup(ctx, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.SaveProbeResultsBatch(ctx, []model.ProbeResult{
+		{NodeID: probeRes.Node.ID, TaskID: latencyTask.ID, ReceivedAt: now, CollectedAt: now, Success: true, LatencyMS: 5},
+		{NodeID: probeRes.Node.ID, TaskID: latencyTask.ID, ReceivedAt: now.Add(30 * time.Second), CollectedAt: now.Add(30 * time.Second), Success: true, LatencyMS: 6},
+		{NodeID: targetRes.Node.ID, TaskID: keeperTask.ID, ReceivedAt: now, CollectedAt: now, Success: true, LatencyMS: 8},
+		{NodeID: probeRes.Node.ID, TaskID: keeperTask.ID, ReceivedAt: now, CollectedAt: now, Success: true, LatencyMS: 9},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.SaveAlertEvent(ctx, model.AlertEvent{
+		ID: uuid.NewString(), Type: "cpu", Status: model.AlertFiring, Severity: "warning",
+		OccurredAt: now, Node: targetRes.Node.Public(), Metric: "cpu", Value: 90, Threshold: 80, Message: "high cpu",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.SaveAlertEvent(ctx, model.AlertEvent{
+		ID: uuid.NewString(), Type: "cpu", Status: model.AlertFiring, Severity: "warning",
+		OccurredAt: now, Node: keeperRes.Node.Public(), Metric: "cpu", Value: 91, Threshold: 80, Message: "high cpu",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := repository.DeleteNode(ctx, targetRes.Node.ID); err != nil {
+		t.Fatalf("DeleteNode failed: %v", err)
+	}
+
+	assertZero := func(query string, args ...any) {
+		t.Helper()
+		var count int
+		if err := repository.readDB.QueryRowContext(ctx, query, args...).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("expected 0 rows for %q (%v), got %d err=%v", query, args, count, err)
+		}
+	}
+	assertOne := func(query string, args ...any) {
+		t.Helper()
+		var count int
+		if err := repository.readDB.QueryRowContext(ctx, query, args...).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("expected 1 row for %q (%v), got %d err=%v", query, args, count, err)
+		}
+	}
+
+	assertZero(`SELECT COUNT(*) FROM nodes WHERE id = ?`, targetRes.Node.ID)
+	assertZero(`SELECT COUNT(*) FROM probe_tasks WHERE id = ?`, latencyTask.ID)
+	assertZero(`SELECT COUNT(*) FROM probe_results WHERE task_id = ?`, latencyTask.ID)
+	assertZero(`SELECT COUNT(*) FROM probe_results WHERE node_id = ?`, targetRes.Node.ID)
+	assertZero(`SELECT COUNT(*) FROM metrics_raw WHERE node_id = ?`, targetRes.Node.ID)
+	assertZero(`SELECT COUNT(*) FROM metrics_5m WHERE node_id = ?`, targetRes.Node.ID)
+	assertZero(`SELECT COUNT(*) FROM metrics_1h WHERE node_id = ?`, targetRes.Node.ID)
+	assertZero(`SELECT COUNT(*) FROM alert_events WHERE node_id = ?`, targetRes.Node.ID)
+
+	// Unrelated keeper node, latency task, metrics, alert event, and probe results must remain untouched.
+	assertOne(`SELECT COUNT(*) FROM nodes WHERE id = ?`, keeperRes.Node.ID)
+	assertOne(`SELECT COUNT(*) FROM probe_tasks WHERE id = ?`, keeperTask.ID)
+	assertOne(`SELECT COUNT(*) FROM probe_results WHERE node_id = ? AND task_id = ?`, probeRes.Node.ID, keeperTask.ID)
+	assertOne(`SELECT COUNT(*) FROM metrics_raw WHERE node_id = ?`, keeperRes.Node.ID)
+	assertOne(`SELECT COUNT(*) FROM metrics_5m WHERE node_id = ?`, keeperRes.Node.ID)
+	assertOne(`SELECT COUNT(*) FROM metrics_1h WHERE node_id = ?`, keeperRes.Node.ID)
+	assertOne(`SELECT COUNT(*) FROM alert_events WHERE node_id = ?`, keeperRes.Node.ID)
+}

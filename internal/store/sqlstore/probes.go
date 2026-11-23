@@ -136,6 +136,19 @@ func (s *SQLStore) SaveProbeTask(ctx context.Context, task model.ProbeTask) (mod
 }
 
 func (s *SQLStore) DeleteProbeTask(ctx context.Context, id int64) error {
+	var exists int
+	if err := s.readDB.QueryRowContext(ctx, s.q(`SELECT 1 FROM probe_tasks WHERE id = ?`), id).Scan(&exists); err != nil {
+		return mapSQLError(err)
+	}
+	if s.driver == "sqlite" {
+		deleted, err := s.deleteRowsBatched(ctx, "probe_results", "task_id", id, sqliteRetentionBatchSize)
+		if err != nil {
+			return err
+		}
+		if deleted >= sqliteRetentionBatchSize && s.sqliteFile {
+			_, _ = s.db.ExecContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`)
+		}
+	}
 	result, err := s.db.ExecContext(ctx, s.q(`DELETE FROM probe_tasks WHERE id = ?`), id)
 	if err != nil {
 		return err
