@@ -1,6 +1,32 @@
 import type { LatencyResult, LatencyWindowSummary } from './types'
 
 export const FAILED_LATENCY_MS = 999
+export const MATRIX_REFRESH_INTERVAL_MS = 15_000
+export const SHORT_HISTORY_REFRESH_MS = 30_000
+export const LONG_HISTORY_REFRESH_MS = 60_000
+
+export function latencyHistoryKey(probeNodeID: string, targetNodeID: string, hours: number): string {
+  return `${probeNodeID}:${targetNodeID}:${hours}`
+}
+
+export function historyRefreshIntervalMs(hours: number): number {
+  return hours <= 6 ? SHORT_HISTORY_REFRESH_MS : LONG_HISTORY_REFRESH_MS
+}
+
+export function shouldRefreshLatencyHistory(options: {
+  force?: boolean
+  nextKey: string
+  lastHistoryKey: string
+  lastHistoryLoadedAt: number | null
+  hours: number
+  now?: number
+}): boolean {
+  const { force = false, nextKey, lastHistoryKey, lastHistoryLoadedAt, hours, now = Date.now() } = options
+  if (!nextKey) return false
+  if (force) return true
+  if (!lastHistoryKey || lastHistoryKey !== nextKey || lastHistoryLoadedAt === null) return true
+  return now - lastHistoryLoadedAt >= historyRefreshIntervalMs(hours)
+}
 
 type LatencySample = Pick<LatencyResult, 'success' | 'latency_ms' | 'loss_percent'>
 

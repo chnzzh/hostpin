@@ -290,30 +290,36 @@
   .latency-matrix tbody th { min-width: 190px; }
   .latency-matrix tbody th a { max-width: 165px; }
   .latency-matrix-wrap { display: none; }
-  .latency-mobile-matrix { display: grid; border: 1px solid var(--line-strong); background: var(--line); gap: 1px; }
-  .latency-mobile-matrix > section { display: grid; gap: 1px; background: var(--line); }
-  .latency-mobile-matrix > section > header { min-height: 72px; padding: 14px; display: flex; align-items: center; justify-content: space-between; background: var(--surface); }
-  .latency-mobile-matrix > section > header a,
-  .latency-mobile-matrix > section > header span { display: block; }
-  .latency-mobile-matrix > section > header a { font-size: 14px; font-weight: 650; }
+  .latency-mobile-matrix { display: grid; grid-template-columns: minmax(0, 1fr); border: 1px solid var(--line-strong); background: var(--line); gap: 1px; }
+  .latency-mobile-matrix > section { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; background: var(--line); }
+  .latency-mobile-matrix > section > header { min-height: 72px; padding: 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; background: var(--surface); }
+  .mobile-probe-node { min-width: 0; display: flex; align-items: center; gap: 9px; }
+  .mobile-probe-node > .status-dot { flex-shrink: 0; }
+  .mobile-probe-node > div { min-width: 0; }
+  .mobile-probe-node b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 650; }
+  .mobile-probe-node span { display: block; overflow-wrap: anywhere; }
+  .latency-mobile-matrix > section > header > small { flex-shrink: 0; }
   .latency-mobile-matrix > section > header span,
-  .latency-mobile-matrix > section > header small { margin-top: 7px; color: var(--text-muted); letter-spacing: .08em; font: 7px/1 ui-monospace, monospace; }
-  .latency-mobile-matrix > section > button { min-height: 82px; padding: 13px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; border: 0; border-left: 3px solid var(--line-strong); background: var(--bg); color: var(--text); text-align: left; }
-  .latency-mobile-matrix > section > button.selected { box-shadow: inset 0 0 0 1px var(--accent); background: color-mix(in srgb, var(--accent) 6%, var(--surface)); }
-  .latency-mobile-matrix > section > button.healthy { border-left-color: var(--accent); }
-  .latency-mobile-matrix > section > button.warning { border-left-color: var(--warning); }
-  .latency-mobile-matrix > section > button.stale { border-left-color: var(--text-muted); opacity: .68; }
-  .latency-mobile-matrix > section > button.critical,
-  .latency-mobile-matrix > section > button.failed { border-left-color: var(--critical); }
-  .mobile-route-node { min-width: 0; display: flex; align-items: center; gap: 9px; }
-  .mobile-route-node > span { min-width: 0; }
+  .latency-mobile-matrix > section > header small { margin-top: 7px; color: var(--text-muted); letter-spacing: .08em; font: 7px/1.4 ui-monospace, monospace; }
+  .mobile-route { min-height: 82px; display: grid; grid-template-columns: minmax(0, 1fr) auto; border-left: 3px solid var(--line-strong); background: var(--bg); color: var(--text); }
+  .mobile-route.selected { box-shadow: inset 0 0 0 1px var(--accent); background: color-mix(in srgb, var(--accent) 6%, var(--surface)); }
+  .mobile-route.healthy { border-left-color: var(--accent); }
+  .mobile-route.warning { border-left-color: var(--warning); }
+  .mobile-route.stale { border-left-color: var(--text-muted); opacity: .68; }
+  .mobile-route.critical,
+  .mobile-route.failed { border-left-color: var(--critical); }
+  .mobile-route-node { min-width: 0; padding: 13px; display: flex; flex-direction: column; justify-content: center; }
+  .mobile-route-node:hover b { color: var(--accent); }
   .mobile-route-node b,
   .mobile-route-node small,
   .mobile-route-result span { display: block; }
   .mobile-route-node b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
   .mobile-route-node small,
-  .mobile-route-result span { margin-top: 7px; color: var(--text-muted); font: 7px/1 ui-monospace, monospace; }
-  .mobile-route-result { text-align: right; }
+  .mobile-route-result span { margin-top: 7px; color: var(--text-muted); font: 7px/1.4 ui-monospace, monospace; }
+  .mobile-route-node small { overflow-wrap: anywhere; }
+  .mobile-route-result { padding: 13px; border: 0; background: transparent; color: inherit; text-align: right; }
+  .mobile-route-result:hover:not(:disabled) { background: var(--surface-2); }
+  .mobile-route-result:disabled { opacity: .58; }
   .mobile-route-result strong { font: 500 22px/1 ui-monospace, monospace; }
   .mobile-route-result strong small { color: var(--text-muted); font-size: 8px; }
   .latency-history-section { padding-bottom: 75px; }

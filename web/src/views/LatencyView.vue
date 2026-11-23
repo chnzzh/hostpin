@@ -5,7 +5,14 @@ import PublicHeader from '../components/PublicHeader.vue'
 import TimeSeriesChart from '../components/TimeSeriesChart.vue'
 import { api, unwrap } from '../api'
 import { relativeTime } from '../format'
-import { FAILED_LATENCY_MS, latencyChartValue, summarizeLatencyWindow } from '../latency'
+import {
+  FAILED_LATENCY_MS,
+  MATRIX_REFRESH_INTERVAL_MS,
+  latencyChartValue,
+  latencyHistoryKey,
+  shouldRefreshLatencyHistory,
+  summarizeLatencyWindow,
+} from '../latency'
 import type { LatencyOverview, LatencyResult, LatencyTarget, LatencyWindowSummary } from '../types'
 import { useLocale } from '../i18n'
 
@@ -20,6 +27,14 @@ const error = ref('')
 const { text } = useLocale()
 let refreshTimer = 0
 let historyRequestID = 0
+let unmounted = false
+let inFlight = false
+let activeLoadIncludeHistory = false
+let upgradeHistoryRefresh = false
+let lastHistoryLoadedAt: number | null = null
+let lastHistoryKey = ''
+let inFlightHistoryKey = ''
+let inFlightHistoryPromise: Promise<void> | null = null
 
 const latestMap = computed(() => new Map(overview.value.latest.map((item) => [`${item.probe_node_id}:${item.target_node_id}`, item])))
 const onlineProbes = computed(() => overview.value.probe_nodes.filter((item) => item.online).length)
@@ -48,67 +63,164 @@ function cellClass(result: LatencyResult | undefined, probeOnline: boolean, inte
   return 'healthy'
 }
 
-async function load() {
+function isDocumentHidden() {
+  return typeof document !== 'undefined' && document.visibilityState === 'hidden'
+}
+
+function clearRefreshTimer() {
+  if (refreshTimer) {
+    window.clearTimeout(refreshTimer)
+    refreshTimer = 0
+  }
+}
+
+function scheduleRefresh() {
+  clearRefreshTimer()
+  if (unmounted || isDocumentHidden()) return
+  refreshTimer = window.setTimeout(() => {
+    refreshTimer = 0
+    if (unmounted || isDocumentHidden()) return
+    void load({ includeHistory: false })
+  }, MATRIX_REFRESH_INTERVAL_MS)
+}
+
+async function load(options: { includeHistory?: boolean } = {}) {
+  const includeHistory = options.includeHistory === true
+  if (unmounted) return
+  clearRefreshTimer()
+  if (inFlight) {
+    if (includeHistory && !activeLoadIncludeHistory) {
+      upgradeHistoryRefresh = true
+    }
+    return
+  }
+
+  inFlight = true
+  activeLoadIncludeHistory = includeHistory
+  upgradeHistoryRefresh = false
+
   try {
-    overview.value = unwrap(await api<{ data: LatencyOverview }>('/api/v1/public/latency'))
+    const nextOverview = unwrap(await api<{ data: LatencyOverview }>('/api/v1/public/latency'))
+    if (unmounted) return
+    overview.value = nextOverview
     error.value = ''
-    if (selected.value && (!overview.value.probe_nodes.some((item) => item.id === selected.value?.probeNodeID) || !overview.value.targets.some((item) => item.node.id === selected.value?.targetNodeID))) {
+    if (
+      selected.value &&
+      (!overview.value.probe_nodes.some((item) => item.id === selected.value?.probeNodeID) ||
+        !overview.value.targets.some((item) => item.node.id === selected.value?.targetNodeID))
+    ) {
       historyRequestID++
+      inFlightHistoryKey = ''
+      inFlightHistoryPromise = null
+      historyLoading.value = false
       selected.value = null
       history.value = []
       historySummary.value = summarizeLatencyWindow([])
+      lastHistoryKey = ''
+      lastHistoryLoadedAt = null
     }
     if (!selected.value && overview.value.latest.length) {
       const first = overview.value.latest[0]
       if (first) selected.value = { probeNodeID: first.probe_node_id, targetNodeID: first.target_node_id }
     }
-    if (selected.value) await loadHistory()
+    if (selected.value) {
+      const forceHistory = includeHistory || upgradeHistoryRefresh
+      const nextKey = latencyHistoryKey(selected.value.probeNodeID, selected.value.targetNodeID, hours.value)
+      if (inFlightHistoryPromise && inFlightHistoryKey === nextKey && !forceHistory) {
+        await inFlightHistoryPromise
+      } else if (
+        shouldRefreshLatencyHistory({
+          force: forceHistory,
+          nextKey,
+          lastHistoryKey,
+          lastHistoryLoadedAt,
+          hours: hours.value,
+        })
+      ) {
+        await loadHistory()
+      }
+    }
   } catch (reason) {
-    error.value = reason instanceof Error ? reason.message : text('无法加载延迟数据。', 'Could not load latency telemetry.')
+    if (!unmounted) {
+      error.value = reason instanceof Error ? reason.message : text('无法加载延迟数据。', 'Could not load latency telemetry.')
+    }
   } finally {
-    loading.value = false
+    if (!unmounted) {
+      loading.value = false
+    }
+    inFlight = false
+    activeLoadIncludeHistory = false
+    upgradeHistoryRefresh = false
+    scheduleRefresh()
   }
+}
+
+function retry() {
+  void load({ includeHistory: true })
 }
 
 async function selectPath(probeNodeID: string, targetNodeID: string) {
   selected.value = { probeNodeID, targetNodeID }
   history.value = []
   historySummary.value = summarizeLatencyWindow([])
+  lastHistoryKey = ''
+  lastHistoryLoadedAt = null
+  inFlightHistoryKey = ''
+  inFlightHistoryPromise = null
   await loadHistory()
 }
 
 async function loadHistory() {
   const path = selected.value
-  if (!path) return
-  const requestID = ++historyRequestID
+  if (!path || unmounted) return
   const requestedHours = hours.value
+  const key = latencyHistoryKey(path.probeNodeID, path.targetNodeID, requestedHours)
+  const requestID = ++historyRequestID
   historyLoading.value = true
-  try {
-    const query = new URLSearchParams({
-      probe_node_id: path.probeNodeID,
-      target_node_id: path.targetNodeID,
-      hours: String(requestedHours),
-      max_points: '600',
-    })
-    const response = await api<{ data: LatencyResult[]; summary?: LatencyWindowSummary }>(`/api/v1/public/latency/history?${query}`)
-    if (requestID !== historyRequestID) return
-    const points = unwrap(response)
-    history.value = points
-    historySummary.value = response.summary ?? summarizeLatencyWindow(points)
-    error.value = ''
-  } catch (reason) {
-    if (requestID === historyRequestID) {
-      error.value = reason instanceof Error ? reason.message : text('无法加载链路历史。', 'Could not load route history.')
+  inFlightHistoryKey = key
+
+  const run = (async () => {
+    try {
+      const query = new URLSearchParams({
+        probe_node_id: path.probeNodeID,
+        target_node_id: path.targetNodeID,
+        hours: String(requestedHours),
+        max_points: '600',
+      })
+      const response = await api<{ data: LatencyResult[]; summary?: LatencyWindowSummary }>(`/api/v1/public/latency/history?${query}`)
+      if (unmounted || requestID !== historyRequestID) return
+      const points = unwrap(response)
+      history.value = points
+      historySummary.value = response.summary ?? summarizeLatencyWindow(points)
+      lastHistoryKey = key
+      lastHistoryLoadedAt = Date.now()
+      error.value = ''
+    } catch (reason) {
+      if (!unmounted && requestID === historyRequestID) {
+        lastHistoryLoadedAt = null
+        error.value = reason instanceof Error ? reason.message : text('无法加载链路历史。', 'Could not load route history.')
+      }
+    } finally {
+      if (requestID === historyRequestID) {
+        inFlightHistoryKey = ''
+        inFlightHistoryPromise = null
+        if (!unmounted) historyLoading.value = false
+      }
     }
-  } finally {
-    if (requestID === historyRequestID) historyLoading.value = false
-  }
+  })()
+
+  inFlightHistoryPromise = run
+  return run
 }
 
 async function changeWindow(value: number) {
   hours.value = value
   history.value = []
   historySummary.value = summarizeLatencyWindow([])
+  lastHistoryKey = ''
+  lastHistoryLoadedAt = null
+  inFlightHistoryKey = ''
+  inFlightHistoryPromise = null
   await loadHistory()
 }
 
@@ -116,11 +228,26 @@ function targetLabel(target: LatencyTarget) {
   return target.node.region || target.node.country_code || target.node.group || text('未设置地区', 'No location')
 }
 
-onMounted(async () => {
-  await load()
-  refreshTimer = window.setInterval(load, 15_000)
+function handleVisibilityChange() {
+  if (unmounted) return
+  if (isDocumentHidden()) {
+    clearRefreshTimer()
+    return
+  }
+  void load({ includeHistory: false })
+}
+
+onMounted(() => {
+  unmounted = false
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  void load({ includeHistory: true })
 })
-onBeforeUnmount(() => window.clearInterval(refreshTimer))
+onBeforeUnmount(() => {
+  unmounted = true
+  historyRequestID++
+  clearRefreshTimer()
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+})
 </script>
 
 <template>
@@ -137,7 +264,7 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer))
         <article><span>{{ text('当前平均延迟', 'Current mean RTT') }}</span><strong>{{ currentAverageLatency === null ? '—' : currentAverageLatency.toFixed(1) }}<small>ms</small></strong></article>
       </section>
 
-      <div v-if="error" class="notice error"><b>{{ text('延迟数据不可用', 'Route data unavailable') }}</b><span>{{ error }}</span><button @click="load">{{ text('重试', 'Retry') }}</button></div>
+      <div v-if="error" class="notice error"><b>{{ text('延迟数据不可用', 'Route data unavailable') }}</b><span>{{ error }}</span><button @click="retry">{{ text('重试', 'Retry') }}</button></div>
       <section class="latency-matrix-section">
         <div v-if="loading" class="latency-loading"><i /><span>{{ text('正在加载延迟数据', 'Loading latency data') }}</span></div>
         <div v-else-if="!overview.probe_nodes.length || !overview.targets.length" class="empty-state latency-empty">
@@ -161,14 +288,16 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer))
             </tbody>
           </table>
         </div>
-        <div v-if="!loading && overview.probe_nodes.length && overview.targets.length" class="latency-mobile-matrix" aria-label="Route perspective matrix mobile view">
-          <section v-for="target in overview.targets" :key="target.task_id">
-            <header><div><RouterLink :to="`/nodes/${target.node.id}`">{{ target.node.name }}</RouterLink><span>{{ targetLabel(target) }} · {{ target.type.toUpperCase() }} · {{ target.samples }}×</span></div><small>{{ text('目标', 'Target') }}</small></header>
-            <button v-for="probe in overview.probe_nodes" :key="probe.id" :class="[cellClass(cell(probe.id, target.node.id), probe.online, target.interval_seconds), { selected: selected?.probeNodeID === probe.id && selected?.targetNodeID === target.node.id }]" :disabled="!cell(probe.id, target.node.id)" :aria-label="text(`${probe.name} 到 ${target.node.name} 的延迟`, `${probe.name} to ${target.node.name} latency`)" @click="selectPath(probe.id, target.node.id)">
-              <span class="mobile-route-node"><i class="status-dot" :class="probe.online ? 'online' : 'offline'" /><span><b>{{ probe.name }}</b><small>{{ probe.region || probe.country_code || text('私有网络', 'Private edge') }}</small></span></span>
-              <span v-if="cell(probe.id, target.node.id)" class="mobile-route-result"><strong>{{ cell(probe.id, target.node.id)?.success ? cell(probe.id, target.node.id)?.latency_ms.toFixed(1) : text('失败', 'Fail') }}<small v-if="cell(probe.id, target.node.id)?.success"> ms</small></strong><span>{{ cell(probe.id, target.node.id)?.loss_percent.toFixed(0) }}% {{ text('丢包', 'loss') }} · {{ relativeTime(cell(probe.id, target.node.id)?.received_at) }}</span></span>
-              <span v-else class="mobile-route-result"><strong>—</strong><span>{{ text('暂无数据', 'No sample') }}</span></span>
-            </button>
+        <div v-if="!loading && overview.probe_nodes.length && overview.targets.length" class="latency-mobile-matrix" :aria-label="text('按测量节点分组的延迟', 'Latency grouped by measurement node')">
+          <section v-for="probe in overview.probe_nodes" :key="probe.id">
+            <header><div class="mobile-probe-node"><i class="status-dot" :class="probe.online ? 'online' : 'offline'" /><div><b>{{ probe.name }}</b><span>{{ probe.region || probe.country_code || text('私有网络', 'Private edge') }}</span></div></div><small>{{ text('测量节点', 'Probe Node') }}</small></header>
+            <div v-for="target in overview.targets" :key="target.task_id" class="mobile-route" :class="[cellClass(cell(probe.id, target.node.id), probe.online, target.interval_seconds), { selected: selected?.probeNodeID === probe.id && selected?.targetNodeID === target.node.id }]">
+              <RouterLink class="mobile-route-node" :to="`/nodes/${target.node.id}`"><b>{{ target.node.name }}</b><small>{{ targetLabel(target) }} · {{ target.type.toUpperCase() }} · {{ target.samples }}×</small></RouterLink>
+              <button class="mobile-route-result" :disabled="!cell(probe.id, target.node.id)" :aria-label="text(`${probe.name} 到 ${target.node.name} 的延迟`, `${probe.name} to ${target.node.name} latency`)" @click="selectPath(probe.id, target.node.id)">
+                <template v-if="cell(probe.id, target.node.id)"><strong>{{ cell(probe.id, target.node.id)?.success ? cell(probe.id, target.node.id)?.latency_ms.toFixed(1) : text('失败', 'Fail') }}<small v-if="cell(probe.id, target.node.id)?.success"> ms</small></strong><span>{{ cell(probe.id, target.node.id)?.loss_percent.toFixed(0) }}% {{ text('丢包', 'loss') }} · {{ relativeTime(cell(probe.id, target.node.id)?.received_at) }}</span></template>
+                <template v-else><strong>—</strong><span>{{ text('暂无数据', 'No sample') }}</span></template>
+              </button>
+            </div>
           </section>
         </div>
       </section>
