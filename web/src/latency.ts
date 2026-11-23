@@ -1,12 +1,35 @@
-import type { LatencyResult, LatencyWindowSummary } from './types'
+import type { LatencyResult, LatencyTarget, LatencyWindowSummary } from './types'
 
 export const FAILED_LATENCY_MS = 999
 export const MATRIX_REFRESH_INTERVAL_MS = 15_000
 export const SHORT_HISTORY_REFRESH_MS = 30_000
 export const LONG_HISTORY_REFRESH_MS = 60_000
 
-export function latencyHistoryKey(probeNodeID: string, targetNodeID: string, hours: number): string {
-  return `${probeNodeID}:${targetNodeID}:${hours}`
+export type LatencyStackFilter = 'all' | 4 | 6
+export type LatencyProtocolFilter = 'all' | 'icmp' | 'tcp'
+
+export function normalizeLatencyIPVersion(value?: number): 4 | 6 {
+  return value === 6 ? 6 : 4
+}
+
+export function filterLatencyTargets(
+  targets: LatencyTarget[],
+  stackFilter: LatencyStackFilter,
+  protocolFilter: LatencyProtocolFilter,
+): LatencyTarget[] {
+  return targets.filter((target) => {
+    if (stackFilter !== 'all' && normalizeLatencyIPVersion(target.ip_version) !== stackFilter) {
+      return false
+    }
+    if (protocolFilter !== 'all' && target.type !== protocolFilter) {
+      return false
+    }
+    return true
+  })
+}
+
+export function latencyHistoryKey(probeNodeID: string, taskID: number | string, hours: number): string {
+  return `${probeNodeID}:${taskID}:${hours}`
 }
 
 export function historyRefreshIntervalMs(hours: number): number {

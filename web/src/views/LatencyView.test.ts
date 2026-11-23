@@ -74,8 +74,8 @@ function makeOverview(withLatest = true): LatencyOverview {
       { id: 'probe-2', name: 'SG Probe', region: 'Singapore', tags: [], online: true },
     ],
     targets: [
-      { task_id: 1, node: makeNode('target-1', 'Tokyo Edge'), type: 'icmp', interval_seconds: 30, samples: 3 },
-      { task_id: 2, node: makeNode('target-2', 'LA Edge'), type: 'tcp', interval_seconds: 30, samples: 3 },
+      { task_id: 1, node: makeNode('target-1', 'Tokyo Edge'), ip_version: 4, type: 'icmp', interval_seconds: 30, samples: 3 },
+      { task_id: 2, node: makeNode('target-2', 'LA Edge'), ip_version: 4, type: 'tcp', interval_seconds: 30, samples: 3 },
     ],
     latest: withLatest
       ? [
@@ -256,6 +256,7 @@ describe('LatencyView polling and history refresh', () => {
     expect(latencyCalls).toBe(1)
     expect(historyUrls).toHaveLength(1)
     expect(historyUrls[0]).toContain('hours=24')
+    expect(historyUrls[0]).toContain('task_id=1')
 
     // At 15s, 30s, 45s on 24H window: matrix refreshes, history does NOT.
     for (const expectedLatencyCalls of [2, 3, 4]) {
@@ -295,6 +296,7 @@ describe('LatencyView polling and history refresh', () => {
     await flushAsync()
     expect(historyUrls).toHaveLength(5)
     expect(historyUrls[4]).toContain('probe_node_id=probe-2')
+    expect(historyUrls[4]).toContain('task_id=2')
     expect(historyUrls[4]).toContain('target_node_id=target-2')
   })
 
@@ -437,5 +439,250 @@ describe('LatencyView polling and history refresh', () => {
     expect(latencyCalls).toBe(2)
     expect(historyCalls).toBe(3)
     expect(root.querySelector('.notice.error')).toBeNull()
+  })
+
+  it('keys matrix cells by task_id across IPv4/IPv6 x ICMP/TCP rows, renders badges, and passes task_id to history', async () => {
+    const now = new Date().toISOString()
+    const historyUrls: string[] = []
+    const tokyo = makeNode('target-1', 'Tokyo Edge')
+    const dualOverview: LatencyOverview = {
+      probe_nodes: [
+        { id: 'probe-1', name: 'HK Probe', region: 'Hong Kong', tags: [], online: true },
+        { id: 'probe-2', name: 'SG Probe', region: 'Singapore', tags: [], online: true },
+      ],
+      targets: [
+        { task_id: 11, node: tokyo, ip_version: 4, type: 'icmp', interval_seconds: 30, samples: 3 },
+        { task_id: 12, node: tokyo, ip_version: 4, type: 'tcp', interval_seconds: 30, samples: 3 },
+        { task_id: 13, node: tokyo, ip_version: 6, type: 'icmp', interval_seconds: 30, samples: 3 },
+        { task_id: 14, node: tokyo, ip_version: 6, type: 'tcp', interval_seconds: 30, samples: 3 },
+      ],
+      latest: [
+        { probe_node_id: 'probe-1', target_node_id: 'target-1', task_id: 11, ip_version: 4, type: 'icmp', collected_at: now, received_at: now, success: true, latency_ms: 21.1, loss_percent: 0 },
+        { probe_node_id: 'probe-1', target_node_id: 'target-1', task_id: 12, ip_version: 4, type: 'tcp', collected_at: now, received_at: now, success: true, latency_ms: 24.4, loss_percent: 0 },
+        { probe_node_id: 'probe-1', target_node_id: 'target-1', task_id: 13, ip_version: 6, type: 'icmp', collected_at: now, received_at: now, success: true, latency_ms: 31.3, loss_percent: 0 },
+        { probe_node_id: 'probe-1', target_node_id: 'target-1', task_id: 14, ip_version: 6, type: 'tcp', collected_at: now, received_at: now, success: true, latency_ms: 35.7, loss_percent: 0 },
+        { probe_node_id: 'probe-2', target_node_id: 'target-1', task_id: 13, ip_version: 6, type: 'icmp', collected_at: now, received_at: now, success: true, latency_ms: 42.8, loss_percent: 0 },
+      ],
+      offline_after_ms: 90_000,
+    }
+
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/v1/public/latency') {
+        return Promise.resolve(jsonResponse({ data: dualOverview }))
+      }
+      if (url.startsWith('/api/v1/public/latency/history?')) {
+        historyUrls.push(url)
+        const parsed = new URL(url, 'http://localhost')
+        const taskID = Number(parsed.searchParams.get('task_id') ?? '11')
+        const probeID = parsed.searchParams.get('probe_node_id') ?? 'probe-1'
+        return Promise.resolve(jsonResponse({
+          data: [{
+            probe_node_id: probeID,
+            target_node_id: 'target-1',
+            task_id: taskID,
+            collected_at: now,
+            received_at: now,
+            success: true,
+            latency_ms: 30,
+            loss_percent: 0,
+          }],
+        }))
+      }
+      throw new Error(`Unexpected URL: ${url}`)
+    }))
+
+    const root = await mountView()
+    const rows = [...root.querySelectorAll('.latency-matrix tbody tr')]
+    expect(rows).toHaveLength(4)
+
+    // Verify each row renders distinct IPv4/IPv6 + ICMP/TCP badges and distinct probe-1 RTT values.
+    const rowBadges = rows.map((row) => ({
+      ip: row.querySelector('th .ip-badge')?.textContent?.trim(),
+      ipClass: row.querySelector('th .ip-badge')?.className,
+      proto: row.querySelector('th .proto-badge')?.textContent?.trim(),
+      probe1Text: row.querySelector('td:nth-of-type(1) button strong')?.textContent?.trim(),
+      probe2Disabled: (row.querySelector('td:nth-of-type(2) button') as HTMLButtonElement | null)?.disabled,
+    }))
+    expect(rowBadges).toEqual([
+      { ip: 'IPv4', ipClass: 'ip-badge v4', proto: 'ICMP', probe1Text: '21.1 ms', probe2Disabled: true },
+      { ip: 'IPv4', ipClass: 'ip-badge v4', proto: 'TCP', probe1Text: '24.4 ms', probe2Disabled: true },
+      { ip: 'IPv6', ipClass: 'ip-badge v6', proto: 'ICMP', probe1Text: '31.3 ms', probe2Disabled: false },
+      { ip: 'IPv6', ipClass: 'ip-badge v6', proto: 'TCP', probe1Text: '35.7 ms', probe2Disabled: true },
+    ])
+
+    // Mobile rows and route history heading also carry crisp IP and protocol badges.
+    expect(root.querySelectorAll('.latency-mobile-matrix .mobile-route .ip-badge').length).toBe(8)
+    expect(root.querySelectorAll('.latency-mobile-matrix .mobile-route .proto-badge').length).toBe(8)
+    expect(root.querySelector('.route-history-heading .ip-badge.v4')?.textContent?.trim()).toBe('IPv4')
+    expect(root.querySelector('.route-history-heading .proto-badge')?.textContent?.trim()).toBe('ICMP')
+
+    // Initial selection is task 11 (first latest entry); only that cell is marked .selected.
+    expect(root.querySelectorAll('.latency-matrix tbody td button.selected')).toHaveLength(1)
+    expect(historyUrls[0]).toContain('probe_node_id=probe-1')
+    expect(historyUrls[0]).toContain('task_id=11')
+    expect(historyUrls[0]).toContain('target_node_id=target-1')
+
+    // Click probe-2 on row 3 (IPv6 ICMP, task_id=13).
+    const probe2Row3Btn = rows[2]!.querySelector('td:nth-of-type(2) button') as HTMLButtonElement
+    probe2Row3Btn.click()
+    await flushAsync()
+
+    expect(historyUrls).toHaveLength(2)
+    expect(historyUrls[1]).toContain('probe_node_id=probe-2')
+    expect(historyUrls[1]).toContain('task_id=13')
+    expect(historyUrls[1]).toContain('target_node_id=target-1')
+    expect(root.querySelectorAll('.latency-matrix tbody td button.selected')).toHaveLength(1)
+    expect(probe2Row3Btn.classList.contains('selected')).toBe(true)
+    expect(root.querySelector('.route-history-heading .ip-badge.v6')?.textContent?.trim()).toBe('IPv6')
+  })
+
+  it('filters matrix by stack and protocol, updates summary stats and selection, and resets empty filters', async () => {
+    const now = new Date().toISOString()
+    const historyUrls: string[] = []
+    const tokyo = makeNode('target-1', 'Tokyo Edge')
+    const filteredOverview: LatencyOverview = {
+      probe_nodes: [
+        { id: 'probe-1', name: 'HK Probe', region: 'Hong Kong', tags: [], online: true },
+      ],
+      targets: [
+        { task_id: 11, node: tokyo, ip_version: 4, type: 'icmp', interval_seconds: 30, samples: 3 },
+        { task_id: 12, node: tokyo, ip_version: 4, type: 'tcp', interval_seconds: 30, samples: 3 },
+        { task_id: 13, node: tokyo, ip_version: 6, type: 'icmp', interval_seconds: 30, samples: 3 },
+      ],
+      latest: [
+        { probe_node_id: 'probe-1', target_node_id: 'target-1', task_id: 11, collected_at: now, received_at: now, success: true, latency_ms: 20, loss_percent: 0 },
+        { probe_node_id: 'probe-1', target_node_id: 'target-1', task_id: 12, collected_at: now, received_at: now, success: true, latency_ms: 40, loss_percent: 0 },
+        { probe_node_id: 'probe-1', target_node_id: 'target-1', task_id: 13, collected_at: now, received_at: now, success: true, latency_ms: 60, loss_percent: 0 },
+      ],
+      offline_after_ms: 90_000,
+    }
+
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/v1/public/latency') {
+        return Promise.resolve(jsonResponse({ data: filteredOverview }))
+      }
+      if (url.startsWith('/api/v1/public/latency/history?')) {
+        historyUrls.push(url)
+        return Promise.resolve(jsonResponse({ data: makeHistory() }))
+      }
+      throw new Error(`Unexpected URL: ${url}`)
+    }))
+
+    const root = await mountView()
+    const summaryCards = () => [...root.querySelectorAll('.latency-summary article strong')].map((el) => el.textContent?.trim())
+    expect(summaryCards()).toEqual(['1/1', '3/3', '40.0ms'])
+
+    const filterButtons = [...root.querySelectorAll('.latency-filter-bar button')] as HTMLButtonElement[]
+    const findBtn = (label: string) => filterButtons.find((btn) => btn.textContent?.trim() === label)!
+
+    // Filter to IPv6 -> 1 row (task 13, 60ms), auto-reselects task 13 and fetches its history.
+    findBtn('IPv6').click()
+    await flushAsync()
+    expect(root.querySelectorAll('.latency-matrix tbody tr')).toHaveLength(1)
+    expect(summaryCards()).toEqual(['1/1', '1/1', '60.0ms'])
+    expect(historyUrls).toHaveLength(2)
+    expect(historyUrls[1]).toContain('task_id=13')
+
+    // Also filter to TCP (IPv6 + TCP = 0 matching targets) -> empty-filter card, selection cleared.
+    findBtn('TCP').click()
+    await flushAsync()
+    expect(root.querySelectorAll('.latency-matrix tbody tr')).toHaveLength(0)
+    expect(root.querySelector('.latency-filter-empty')).not.toBeNull()
+    expect(root.querySelector('.latency-history-section')).toBeNull()
+    expect(summaryCards()).toEqual(['1/1', '0/0', '—ms'])
+
+    // Reset filters -> restores all 3 rows and auto-selects first matching route (task 11).
+    const resetBtn = root.querySelector('.latency-filter-empty button') as HTMLButtonElement
+    expect(resetBtn).not.toBeNull()
+    resetBtn.click()
+    await flushAsync()
+    expect(root.querySelector('.latency-filter-empty')).toBeNull()
+    expect(root.querySelectorAll('.latency-matrix tbody tr')).toHaveLength(3)
+    expect(summaryCards()).toEqual(['1/1', '3/3', '40.0ms'])
+    expect(historyUrls).toHaveLength(3)
+    expect(historyUrls[2]).toContain('task_id=11')
+  })
+
+  it('switches between configured sibling stack/protocol curves via Route History sibling tabs', async () => {
+    const now = new Date().toISOString()
+    const historyUrls: string[] = []
+    const tokyo = makeNode('target-1', 'Tokyo Edge')
+    const la = makeNode('target-2', 'LA Edge')
+    const multiOverview: LatencyOverview = {
+      probe_nodes: [
+        { id: 'probe-1', name: 'HK Probe', region: 'Hong Kong', tags: [], online: true },
+      ],
+      targets: [
+        { task_id: 11, node: tokyo, ip_version: 4, type: 'icmp', interval_seconds: 30, samples: 3 },
+        { task_id: 12, node: tokyo, ip_version: 4, type: 'tcp', interval_seconds: 30, samples: 3 },
+        { task_id: 13, node: tokyo, ip_version: 6, type: 'icmp', interval_seconds: 30, samples: 3 },
+        { task_id: 14, node: tokyo, ip_version: 6, type: 'tcp', interval_seconds: 30, samples: 3 },
+        { task_id: 21, node: la, ip_version: 4, type: 'icmp', interval_seconds: 30, samples: 3 },
+      ],
+      latest: [
+        { probe_node_id: 'probe-1', target_node_id: 'target-1', task_id: 11, collected_at: now, received_at: now, success: true, latency_ms: 21, loss_percent: 0 },
+        { probe_node_id: 'probe-1', target_node_id: 'target-1', task_id: 14, collected_at: now, received_at: now, success: true, latency_ms: 35, loss_percent: 0 },
+        { probe_node_id: 'probe-1', target_node_id: 'target-2', task_id: 21, collected_at: now, received_at: now, success: true, latency_ms: 115, loss_percent: 0 },
+      ],
+      offline_after_ms: 90_000,
+    }
+
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/v1/public/latency') {
+        return Promise.resolve(jsonResponse({ data: multiOverview }))
+      }
+      if (url.startsWith('/api/v1/public/latency/history?')) {
+        historyUrls.push(url)
+        return Promise.resolve(jsonResponse({ data: makeHistory() }))
+      }
+      throw new Error(`Unexpected URL: ${url}`)
+    }))
+
+    const root = await mountView()
+    const siblingTabs = () => [...root.querySelectorAll('.latency-sibling-tabs button')] as HTMLButtonElement[]
+    expect(siblingTabs().map((tab) => tab.textContent?.trim())).toEqual([
+      'IPv4 · ICMP',
+      'IPv4 · TCP',
+      'IPv6 · ICMP',
+      'IPv6 · TCP',
+    ])
+    expect(siblingTabs()[0]?.classList.contains('active')).toBe(true)
+
+    // Switch directly to IPv6 · TCP sibling tab (even if matrix row was filtered, or directly in default view).
+    siblingTabs()[3]!.click()
+    await flushAsync()
+
+    expect(historyUrls).toHaveLength(2)
+    expect(historyUrls[1]).toContain('probe_node_id=probe-1')
+    expect(historyUrls[1]).toContain('task_id=14')
+    expect(historyUrls[1]).toContain('target_node_id=target-1')
+    expect(siblingTabs()[3]?.classList.contains('active')).toBe(true)
+    expect(root.querySelector('.route-history-heading .ip-badge.v6')?.textContent?.trim()).toBe('IPv6')
+    expect(root.querySelector('.route-history-heading .proto-badge')?.textContent?.trim()).toBe('TCP')
+
+    // Filter to IPv6, then click IPv4 · TCP sibling tab -> widens stack filter back to All and loads task 12.
+    const tokyoRow1Btn = root.querySelectorAll('.latency-matrix tbody tr')[0]?.querySelector('td button') as HTMLButtonElement
+    tokyoRow1Btn.click()
+    await flushAsync()
+    const ipv6Btn = [...root.querySelectorAll('.latency-filter-bar button')].find((btn) => btn.textContent?.trim() === 'IPv6') as HTMLButtonElement
+    ipv6Btn.click()
+    await flushAsync()
+    expect(root.querySelectorAll('.latency-matrix tbody tr')).toHaveLength(2)
+
+    const ipv4TcpTab = siblingTabs().find((tab) => tab.textContent?.trim() === 'IPv4 · TCP')!
+    ipv4TcpTab.click()
+    await flushAsync()
+    expect(root.querySelectorAll('.latency-matrix tbody tr')).toHaveLength(5)
+    expect(historyUrls.at(-1)).toContain('task_id=12')
+
+    // Click mobile route cell for LA Edge (task_id: 21, single configured task) -> sibling tabs disappear.
+    const mobileLaBtn = root.querySelectorAll('.latency-mobile-matrix .mobile-route')[4]?.querySelector('button.mobile-route-result') as HTMLButtonElement
+    mobileLaBtn.click()
+    await flushAsync()
+    expect(historyUrls.at(-1)).toContain('task_id=21')
+    expect(root.querySelector('.latency-sibling-tabs')).toBeNull()
   })
 })
