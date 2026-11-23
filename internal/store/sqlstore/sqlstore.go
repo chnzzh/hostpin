@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chnzzh/hostpin/internal/config"
@@ -19,15 +20,56 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+const (
+	sqliteWriterParams = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_txlock=immediate"
+	sqliteMemoryParams = "_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_txlock=immediate"
+	sqliteReaderParams = "mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)&_pragma=temp_store(MEMORY)&_pragma=cache_size(-16000)"
+)
+
 type SQLStore struct {
-	db     *sql.DB
-	driver string
+	db           *sql.DB
+	readDB       *sql.DB
+	driver       string
+	sqliteFile   bool
+	rollupMu     sync.Mutex
+	lastRollup5m time.Time
+	lastRollup1h time.Time
+}
+
+func isSQLiteMemoryDSN(dsn string) bool {
+	trimmed := strings.TrimSpace(dsn)
+	lower := strings.ToLower(trimmed)
+	return trimmed == "" ||
+		lower == ":memory:" ||
+		strings.HasPrefix(lower, "file::memory:") ||
+		strings.Contains(lower, "mode=memory")
+}
+
+func appendDSNParams(dsn, params string) string {
+	if strings.Contains(dsn, "?") {
+		return dsn + "&" + params
+	}
+	return dsn + "?" + params
+}
+
+func sqliteDirFromDSN(dsn string) string {
+	raw := strings.TrimSpace(dsn)
+	if strings.HasPrefix(raw, "file:") {
+		pathPart, _, _ := strings.Cut(strings.TrimPrefix(raw, "file:"), "?")
+		if pathPart == "" {
+			return ""
+		}
+		return filepath.Dir(filepath.FromSlash(pathPart))
+	}
+	return filepath.Dir(raw)
 }
 
 func Open(ctx context.Context, cfg config.DatabaseConfig) (*SQLStore, error) {
 	driver := strings.ToLower(strings.TrimSpace(cfg.Driver))
 	openDriver := "sqlite"
 	dsn := cfg.DSN
+	var baseSQLiteDSN string
+	sqliteFile := false
 	if driver == "postgresql" {
 		driver = "postgres"
 	}
@@ -35,17 +77,27 @@ func Open(ctx context.Context, cfg config.DatabaseConfig) (*SQLStore, error) {
 		openDriver = "pgx"
 	} else {
 		driver = "sqlite"
-		if err := os.MkdirAll(filepath.Dir(cfg.DSN), 0o750); err != nil {
-			return nil, fmt.Errorf("create sqlite directory: %w", err)
+		sqliteFile = !isSQLiteMemoryDSN(cfg.DSN)
+		if sqliteFile {
+			if dir := sqliteDirFromDSN(cfg.DSN); dir != "" {
+				if err := os.MkdirAll(dir, 0o750); err != nil {
+					return nil, fmt.Errorf("create sqlite directory: %w", err)
+				}
+			}
 		}
-		if !strings.HasPrefix(dsn, "file:") {
-			dsn = "file:" + filepath.ToSlash(dsn)
+		baseSQLiteDSN = strings.TrimSpace(dsn)
+		if !strings.HasPrefix(baseSQLiteDSN, "file:") {
+			if sqliteFile {
+				baseSQLiteDSN = "file:" + filepath.ToSlash(baseSQLiteDSN)
+			} else {
+				baseSQLiteDSN = "file:" + baseSQLiteDSN
+			}
 		}
-		separator := "?"
-		if strings.Contains(dsn, "?") {
-			separator = "&"
+		if sqliteFile {
+			dsn = appendDSNParams(baseSQLiteDSN, sqliteWriterParams)
+		} else {
+			dsn = appendDSNParams(baseSQLiteDSN, sqliteMemoryParams)
 		}
-		dsn += separator + "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"
 	}
 
 	db, err := sql.Open(openDriver, dsn)
@@ -53,11 +105,8 @@ func Open(ctx context.Context, cfg config.DatabaseConfig) (*SQLStore, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 	if driver == "sqlite" {
-		// SQLite permits concurrent readers in WAL mode, but upgrading parallel
-		// read transactions to writers can still produce SQLITE_BUSY_SNAPSHOT.
-		// database/sql's connection wait queue gives this deployment mode the
-		// required single ordered write lane and keeps enrollment/report writes
-		// deterministic under burst load.
+		// SQLite permits concurrent readers in WAL mode, while writer transactions
+		// serialize cleanly through a dedicated single-connection writer pool.
 		db.SetMaxOpenConns(1)
 		db.SetMaxIdleConns(1)
 	} else {
@@ -66,7 +115,7 @@ func Open(ctx context.Context, cfg config.DatabaseConfig) (*SQLStore, error) {
 		db.SetConnMaxIdleTime(5 * time.Minute)
 	}
 
-	s := &SQLStore{db: db, driver: driver}
+	s := &SQLStore{db: db, readDB: db, driver: driver, sqliteFile: sqliteFile}
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
@@ -78,6 +127,23 @@ func Open(ctx context.Context, cfg config.DatabaseConfig) (*SQLStore, error) {
 	if err := s.EnsureMetricPartitions(ctx, time.Now().UTC()); err != nil {
 		db.Close()
 		return nil, err
+	}
+	if sqliteFile {
+		readDSN := appendDSNParams(baseSQLiteDSN, sqliteReaderParams)
+		readDB, err := sql.Open(openDriver, readDSN)
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("open sqlite reader pool: %w", err)
+		}
+		readDB.SetMaxOpenConns(6)
+		readDB.SetMaxIdleConns(4)
+		readDB.SetConnMaxIdleTime(5 * time.Minute)
+		if err := readDB.PingContext(ctx); err != nil {
+			readDB.Close()
+			db.Close()
+			return nil, fmt.Errorf("ping sqlite reader pool: %w", err)
+		}
+		s.readDB = readDB
 	}
 	return s, nil
 }
@@ -95,8 +161,25 @@ func (s *SQLStore) EnsureMetricPartitions(ctx context.Context, now time.Time) er
 	return nil
 }
 
-func (s *SQLStore) Driver() string                 { return s.driver }
-func (s *SQLStore) Close() error                   { return s.db.Close() }
+func (s *SQLStore) Driver() string { return s.driver }
+
+func (s *SQLStore) Close() error {
+	var readErr error
+	if s.readDB != nil && s.readDB != s.db {
+		readErr = s.readDB.Close()
+	}
+	if s.sqliteFile && s.db != nil {
+		checkpointCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, _ = s.db.ExecContext(checkpointCtx, `PRAGMA wal_checkpoint(TRUNCATE)`)
+		cancel()
+	}
+	var writeErr error
+	if s.db != nil {
+		writeErr = s.db.Close()
+	}
+	return errors.Join(readErr, writeErr)
+}
+
 func (s *SQLStore) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
 func (s *SQLStore) migrate(ctx context.Context) error {

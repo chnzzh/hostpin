@@ -62,7 +62,7 @@ func (s *SQLStore) listProbeTasks(ctx context.Context, nodeID string, enabledOnl
 		query += ` WHERE enabled = ` + s.enabledLiteral()
 	}
 	query += ` ORDER BY id`
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := s.readDB.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -147,19 +147,84 @@ func (s *SQLStore) DeleteProbeTask(ctx context.Context, id int64) error {
 	return nil
 }
 
-func (s *SQLStore) SaveProbeResult(ctx context.Context, result model.ProbeResult) error {
+const probeResultUpsertQuery = `INSERT INTO probe_results(node_id, task_id, ts, collected_at, success, latency_ms, loss_percent, status_code, value, error) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(node_id, task_id, ts) DO UPDATE SET collected_at=excluded.collected_at, success=excluded.success, latency_ms=excluded.latency_ms, loss_percent=excluded.loss_percent, status_code=excluded.status_code, value=excluded.value, error=excluded.error`
+
+func normalizeProbeResult(result model.ProbeResult, defaultNow time.Time) model.ProbeResult {
 	if result.ReceivedAt.IsZero() {
-		result.ReceivedAt = time.Now().UTC()
+		result.ReceivedAt = defaultNow
 	}
 	if result.CollectedAt.IsZero() {
 		result.CollectedAt = result.ReceivedAt
 	}
-	query := `INSERT INTO probe_results(node_id, task_id, ts, collected_at, success, latency_ms, loss_percent, status_code, value, error) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT(node_id, task_id, ts) DO UPDATE SET collected_at=excluded.collected_at, success=excluded.success, latency_ms=excluded.latency_ms, loss_percent=excluded.loss_percent, status_code=excluded.status_code, value=excluded.value, error=excluded.error`
-	_, err := s.db.ExecContext(ctx, s.q(query), result.NodeID, result.TaskID,
+	return result
+}
+
+func (s *SQLStore) probeResultArgs(result model.ProbeResult) []any {
+	return []any{
+		result.NodeID, result.TaskID,
 		millis(result.ReceivedAt), millis(result.CollectedAt), s.boolArg(result.Success),
-		result.LatencyMS, result.LossPercent, result.StatusCode, result.Value, result.Error)
+		result.LatencyMS, result.LossPercent, result.StatusCode, result.Value, result.Error,
+	}
+}
+
+func (s *SQLStore) SaveProbeResult(ctx context.Context, result model.ProbeResult) error {
+	result = normalizeProbeResult(result, time.Now().UTC())
+	_, err := s.db.ExecContext(ctx, s.q(probeResultUpsertQuery), s.probeResultArgs(result)...)
 	return err
+}
+
+func (s *SQLStore) SaveProbeResultsBatch(ctx context.Context, results []model.ProbeResult) error {
+	if len(results) == 0 {
+		return nil
+	}
+	if len(results) == 1 {
+		return s.SaveProbeResult(ctx, results[0])
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.PrepareContext(ctx, s.q(probeResultUpsertQuery))
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	now := time.Now().UTC()
+	var batchErr error
+	for _, result := range results {
+		result = normalizeProbeResult(result, now)
+		if _, err := stmt.ExecContext(ctx, s.probeResultArgs(result)...); err != nil {
+			batchErr = err
+			break
+		}
+	}
+	_ = stmt.Close()
+	if batchErr == nil {
+		if commitErr := tx.Commit(); commitErr == nil {
+			return nil
+		} else {
+			batchErr = commitErr
+		}
+	} else {
+		_ = tx.Rollback()
+	}
+	if ctx.Err() != nil || s.Ping(ctx) != nil {
+		return batchErr
+	}
+	var firstErr error
+	for _, result := range results {
+		if ctx.Err() != nil {
+			if firstErr != nil {
+				return firstErr
+			}
+			return ctx.Err()
+		}
+		if err := s.SaveProbeResult(ctx, result); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func (s *SQLStore) ProbeHistory(ctx context.Context, nodeID string, taskID int64, start, end time.Time, limit int) ([]model.ProbeResult, error) {
@@ -178,7 +243,7 @@ func (s *SQLStore) ProbeHistory(ctx context.Context, nodeID string, taskID int64
 	}
 	query += ` ORDER BY ts DESC LIMIT ?`
 	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, s.q(query), args...)
+	rows, err := s.readDB.QueryContext(ctx, s.q(query), args...)
 	if err != nil {
 		return nil, err
 	}

@@ -29,7 +29,7 @@ func scanTheme(row rowScanner) (model.Theme, error) {
 }
 
 func (s *SQLStore) ListThemes(ctx context.Context) ([]model.Theme, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT manifest_json, settings_json, source_url, checksum, installed_at, updated_at FROM themes ORDER BY short`)
+	rows, err := s.readDB.QueryContext(ctx, `SELECT manifest_json, settings_json, source_url, checksum, installed_at, updated_at FROM themes ORDER BY short`)
 	if err != nil {
 		return nil, err
 	}
@@ -46,7 +46,7 @@ func (s *SQLStore) ListThemes(ctx context.Context) ([]model.Theme, error) {
 }
 
 func (s *SQLStore) GetTheme(ctx context.Context, short string) (model.Theme, error) {
-	return scanTheme(s.db.QueryRowContext(ctx, s.q(`SELECT manifest_json, settings_json, source_url, checksum, installed_at, updated_at FROM themes WHERE short = ?`), short))
+	return scanTheme(s.readDB.QueryRowContext(ctx, s.q(`SELECT manifest_json, settings_json, source_url, checksum, installed_at, updated_at FROM themes WHERE short = ?`), short))
 }
 
 func (s *SQLStore) SaveTheme(ctx context.Context, theme model.Theme) error {

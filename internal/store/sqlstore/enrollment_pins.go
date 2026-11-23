@@ -55,13 +55,13 @@ func (s *SQLStore) ReplaceTemporaryEnrollmentPIN(ctx context.Context, pin store.
 }
 
 func (s *SQLStore) LatestTemporaryEnrollmentPIN(ctx context.Context) (store.TemporaryEnrollmentPIN, error) {
-	return scanTemporaryEnrollmentPIN(s.db.QueryRowContext(ctx,
+	return scanTemporaryEnrollmentPIN(s.readDB.QueryRowContext(ctx,
 		`SELECT `+temporaryEnrollmentPINColumns+` FROM temporary_enrollment_pins ORDER BY created_at DESC LIMIT 1`,
 	))
 }
 
 func (s *SQLStore) ActiveTemporaryEnrollmentPIN(ctx context.Context, now time.Time) (store.TemporaryEnrollmentPIN, error) {
-	return scanTemporaryEnrollmentPIN(s.db.QueryRowContext(ctx, s.q(
+	return scanTemporaryEnrollmentPIN(s.readDB.QueryRowContext(ctx, s.q(
 		`SELECT `+temporaryEnrollmentPINColumns+` FROM temporary_enrollment_pins WHERE revoked_at IS NULL AND expires_at > ? ORDER BY created_at DESC LIMIT 1`,
 	), millis(now)))
 }

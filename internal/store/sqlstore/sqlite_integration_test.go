@@ -7,6 +7,7 @@ import (
 	"math"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -435,5 +436,270 @@ func TestSQLiteLatencyProbeRolesDispatchAndHistory(t *testing.T) {
 	allTasks, err := repository.ListAllProbeTasks(ctx)
 	if err != nil || len(allTasks) != 1 || allTasks[0].ID != custom.ID {
 		t.Fatalf("deleting the target did not cascade its latency task: %#v %v", allTasks, err)
+	}
+}
+
+func TestSQLiteReadWritePoolSplitMemoryModeAndIndexes(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "pool-split.db")
+	repository, err := Open(ctx, config.DatabaseConfig{Driver: "sqlite", DSN: dbPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repository.Close()
+
+	if !repository.sqliteFile || repository.readDB == nil || repository.readDB == repository.db {
+		t.Fatalf("expected separate reader pool for file-backed SQLite: sqliteFile=%v samePool=%v", repository.sqliteFile, repository.readDB == repository.db)
+	}
+	if got := repository.db.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("writer MaxOpenConnections = %d, want 1", got)
+	}
+	if got := repository.readDB.Stats().MaxOpenConnections; got != 6 {
+		t.Fatalf("reader MaxOpenConnections = %d, want 6", got)
+	}
+	if _, err := repository.readDB.ExecContext(ctx, `CREATE TABLE should_fail (id INTEGER)`); err == nil {
+		t.Fatal("expected readDB to reject write statements")
+	}
+
+	indexRows, err := repository.readDB.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'probe_results'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexes := make(map[string]bool)
+	for indexRows.Next() {
+		var name string
+		if err := indexRows.Scan(&name); err != nil {
+			indexRows.Close()
+			t.Fatal(err)
+		}
+		indexes[name] = true
+	}
+	indexRows.Close()
+	if indexes["idx_probe_results_lookup"] {
+		t.Fatal("redundant idx_probe_results_lookup was not dropped by migration 010")
+	}
+	if !indexes["idx_probe_results_ts"] || !indexes["idx_probe_results_summary"] {
+		t.Fatalf("expected probe_results performance indexes, got %#v", indexes)
+	}
+
+	now := time.Date(2026, 8, 26, 0, 0, 0, 0, time.UTC)
+	admin := store.Admin{ID: uuid.NewString(), Username: "admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}
+	if err := repository.Initialize(ctx, admin, "pin", model.DefaultSiteSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 8)
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				if _, err := repository.SetupComplete(ctx); err != nil {
+					errCh <- err
+					return
+				}
+				if _, err := repository.SiteSettings(ctx); err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for readErr := range errCh {
+		t.Fatalf("concurrent reader pool query failed: %v", readErr)
+	}
+
+	memRepo, err := Open(ctx, config.DatabaseConfig{Driver: "sqlite", DSN: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer memRepo.Close()
+	if memRepo.sqliteFile || memRepo.readDB != memRepo.db {
+		t.Fatalf("expected in-memory SQLite to share single pool: sqliteFile=%v samePool=%v", memRepo.sqliteFile, memRepo.readDB == memRepo.db)
+	}
+	if err := memRepo.Initialize(ctx, admin, "pin", model.DefaultSiteSettings()); err != nil {
+		t.Fatalf("in-memory initialize failed: %v", err)
+	}
+	complete, err := memRepo.SetupComplete(ctx)
+	if err != nil || !complete {
+		t.Fatalf("in-memory SetupComplete = %v, %v", complete, err)
+	}
+}
+
+func TestSQLiteBatchPersistenceRollupAndRetention(t *testing.T) {
+	ctx := context.Background()
+	repository, err := Open(ctx, config.DatabaseConfig{Driver: "sqlite", DSN: filepath.Join(t.TempDir(), "batch-rollup-retention.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repository.Close()
+
+	now := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	enroll := func(role model.NodeRole, name, tokenID string) model.Node {
+		t.Helper()
+		record, err := repository.EnrollNode(ctx, store.EnrollParams{
+			Request: model.EnrollmentRequest{
+				InstallID: uuid.NewString(), Role: role,
+				Identity: model.AgentIdentity{Hostname: name, OS: "linux", Arch: "amd64"},
+				Metadata: model.EnrollmentMetadata{Name: name}, Config: model.DefaultAgentConfig(),
+			},
+			NodeID: uuid.NewString(), TokenID: tokenID, TokenHash: "hash-" + tokenID, Now: now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record.Node
+	}
+
+	targetA := enroll(model.NodeRoleMonitor, "target-a", "tok-a")
+	targetB := enroll(model.NodeRoleMonitor, "target-b", "tok-b")
+	probe1 := enroll(model.NodeRoleProbe, "probe-1", "tok-p1")
+	probe2 := enroll(model.NodeRoleProbe, "probe-2", "tok-p2")
+
+	if err := repository.SaveMetricsBatch(ctx, nil); err != nil {
+		t.Fatalf("empty SaveMetricsBatch failed: %v", err)
+	}
+	if err := repository.SaveProbeResultsBatch(ctx, nil); err != nil {
+		t.Fatalf("empty SaveProbeResultsBatch failed: %v", err)
+	}
+
+	batchSamples := []model.MetricSample{
+		{NodeID: targetA.ID, Sequence: 1, ReceivedAt: now, CollectedAt: now, CPU: 10, Disks: []model.DiskMetric{{Mountpoint: "/", Total: 100, Used: 40}}, Message: "initial"},
+		{NodeID: targetA.ID, Sequence: 2, ReceivedAt: now, CollectedAt: now, CPU: 20, Disks: []model.DiskMetric{{Mountpoint: "/", Total: 100, Used: 50}}, Message: "updated"},
+		{NodeID: targetB.ID, Sequence: 1, ReceivedAt: now.Add(time.Minute), CollectedAt: now.Add(time.Minute), CPU: 30},
+	}
+	if err := repository.SaveMetricsBatch(ctx, batchSamples); err != nil {
+		t.Fatalf("SaveMetricsBatch failed: %v", err)
+	}
+	latestA, err := repository.LatestMetric(ctx, targetA.ID)
+	if err != nil || latestA.Sequence != 2 || latestA.CPU != 20 {
+		t.Fatalf("duplicate key upsert in SaveMetricsBatch failed: %#v %v", latestA, err)
+	}
+
+	mixedSamples := []model.MetricSample{
+		{NodeID: targetA.ID, Sequence: 3, ReceivedAt: now.Add(2 * time.Minute), CollectedAt: now.Add(2 * time.Minute), CPU: 40},
+		{NodeID: "missing-node-id", Sequence: 1, ReceivedAt: now.Add(2 * time.Minute), CollectedAt: now.Add(2 * time.Minute), CPU: 99},
+		{NodeID: targetB.ID, Sequence: 2, ReceivedAt: now.Add(2 * time.Minute), CollectedAt: now.Add(2 * time.Minute), CPU: 50},
+	}
+	if err := repository.SaveMetricsBatch(ctx, mixedSamples); err == nil {
+		t.Fatal("expected SaveMetricsBatch to return foreign key error for missing node")
+	}
+	latestA, err = repository.LatestMetric(ctx, targetA.ID)
+	if err != nil || latestA.Sequence != 3 || latestA.CPU != 40 {
+		t.Fatalf("valid sample before bad FK item was lost: %#v %v", latestA, err)
+	}
+	latestB, err := repository.LatestMetric(ctx, targetB.ID)
+	if err != nil || latestB.Sequence != 2 || latestB.CPU != 50 {
+		t.Fatalf("valid sample after bad FK item was lost: %#v %v", latestB, err)
+	}
+
+	taskA, err := repository.SaveProbeTask(ctx, model.ProbeTask{
+		Name: "lat-a", Type: model.ProbeICMP, Target: "203.0.113.1",
+		IntervalSeconds: 30, TimeoutSeconds: 2, Purpose: "latency",
+		RunOn: model.NodeRoleProbe, TargetNodeID: targetA.ID, Public: true, Samples: 3, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskB, err := repository.SaveProbeTask(ctx, model.ProbeTask{
+		Name: "lat-b", Type: model.ProbeICMP, Target: "203.0.113.2",
+		IntervalSeconds: 30, TimeoutSeconds: 2, Purpose: "latency",
+		RunOn: model.NodeRoleProbe, TargetNodeID: targetB.ID, Public: true, Samples: 3, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	probeBatch := []model.ProbeResult{
+		{NodeID: probe2.ID, TaskID: taskB.ID, ReceivedAt: now, CollectedAt: now, Success: true, LatencyMS: 12},
+		{NodeID: probe1.ID, TaskID: taskA.ID, ReceivedAt: now, CollectedAt: now, Success: true, LatencyMS: 5},
+		{NodeID: probe1.ID, TaskID: taskA.ID, ReceivedAt: now.Add(time.Minute), CollectedAt: now.Add(time.Minute), Success: true, LatencyMS: 7},
+		{NodeID: "missing-probe-node", TaskID: taskA.ID, ReceivedAt: now, CollectedAt: now, Success: false, LatencyMS: -1},
+		{NodeID: probe2.ID, TaskID: taskA.ID, ReceivedAt: now.Add(30 * time.Second), CollectedAt: now.Add(30 * time.Second), Success: true, LatencyMS: 9},
+	}
+	if err := repository.SaveProbeResultsBatch(ctx, probeBatch); err == nil {
+		t.Fatal("expected SaveProbeResultsBatch to return foreign key error for missing node")
+	}
+
+	latestLatency, err := repository.LatestLatencyResults(ctx, now.Add(-time.Minute))
+	if err != nil || len(latestLatency) != 3 {
+		t.Fatalf("LatestLatencyResults = %#v, err=%v", latestLatency, err)
+	}
+	for i := 1; i < len(latestLatency); i++ {
+		prev, curr := latestLatency[i-1], latestLatency[i]
+		if prev.TargetNodeID > curr.TargetNodeID || (prev.TargetNodeID == curr.TargetNodeID && prev.ProbeNodeID > curr.ProbeNodeID) {
+			t.Fatalf("LatestLatencyResults not sorted by (TargetNodeID, ProbeNodeID): %#v", latestLatency)
+		}
+	}
+	for _, r := range latestLatency {
+		if r.ProbeNodeID == probe1.ID && r.TargetNodeID == targetA.ID && r.LatencyMS != 7 {
+			t.Fatalf("expected latest latency 7ms for (probe1, targetA), got %#v", r)
+		}
+	}
+
+	// Test initial and incremental Rollup (ensuring straddling 5m bucket stays complete).
+	firstRollupAt := now.Add(3 * time.Minute)
+	if err := repository.Rollup(ctx, firstRollupAt); err != nil {
+		t.Fatalf("initial Rollup failed: %v", err)
+	}
+	if !repository.lastRollup5m.Equal(firstRollupAt) || !repository.lastRollup1h.Equal(firstRollupAt) {
+		t.Fatalf("lastRollup timestamps not updated: 5m=%v 1h=%v", repository.lastRollup5m, repository.lastRollup1h)
+	}
+	if err := repository.SaveMetric(ctx, model.MetricSample{
+		NodeID: targetA.ID, Sequence: 4, ReceivedAt: now.Add(4 * time.Minute), CollectedAt: now.Add(4 * time.Minute), CPU: 60,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.SaveMetric(ctx, model.MetricSample{
+		NodeID: targetA.ID, Sequence: 5, ReceivedAt: now.Add(6 * time.Minute), CollectedAt: now.Add(6 * time.Minute), CPU: 80,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	secondRollupAt := now.Add(8 * time.Minute)
+	if err := repository.Rollup(ctx, secondRollupAt); err != nil {
+		t.Fatalf("incremental Rollup failed: %v", err)
+	}
+	var bucketCount int
+	var avgCPU float64
+	if err := repository.readDB.QueryRowContext(ctx, `SELECT COUNT(*), AVG(cpu) FROM metrics_5m WHERE node_id = ?`, targetA.ID).Scan(&bucketCount, &avgCPU); err != nil {
+		t.Fatal(err)
+	}
+	// Bucket 1 [10:00..10:05) has CPU 20, 40, 60 -> avg 40; Bucket 2 [10:05..10:10) has CPU 80 -> overall avg 60 across 2 buckets.
+	if bucketCount != 2 || math.Abs(avgCPU-60) > 0.001 {
+		t.Fatalf("incremental 5m rollup buckets=%d avgCPU=%v, want 2 and 60", bucketCount, avgCPU)
+	}
+
+	// Test multi-batch deletion loop and end-to-end ApplyRetention.
+	expiredBase := now.Add(-10 * 24 * time.Hour)
+	expiredBatch := make([]model.MetricSample, 11)
+	for i := range expiredBatch {
+		at := expiredBase.Add(time.Duration(i) * time.Second)
+		expiredBatch[i] = model.MetricSample{NodeID: targetA.ID, Sequence: uint64(100 + i), ReceivedAt: at, CollectedAt: at, CPU: 1}
+	}
+	if err := repository.SaveMetricsBatch(ctx, expiredBatch); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.deleteExpiredRows(ctx, "metrics_raw", now.Add(-24*time.Hour), 4); err != nil {
+		t.Fatalf("batched deleteExpiredRows failed: %v", err)
+	}
+	var remainingExpired int
+	if err := repository.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM metrics_raw WHERE ts < ?`, millis(now.Add(-24*time.Hour))).Scan(&remainingExpired); err != nil || remainingExpired != 0 {
+		t.Fatalf("remaining expired metrics_raw = %d, err=%v", remainingExpired, err)
+	}
+
+	if err := repository.SaveProbeResult(ctx, model.ProbeResult{
+		NodeID: probe1.ID, TaskID: taskA.ID, ReceivedAt: now.Add(-100 * 24 * time.Hour), CollectedAt: now.Add(-100 * 24 * time.Hour), Success: true, LatencyMS: 11,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.ApplyRetention(ctx, model.DefaultSiteSettings(), now.Add(10*time.Minute)); err != nil {
+		t.Fatalf("ApplyRetention failed: %v", err)
+	}
+	var oldProbes int
+	if err := repository.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM probe_results WHERE ts < ?`, millis(now.Add(-90*24*time.Hour))).Scan(&oldProbes); err != nil || oldProbes != 0 {
+		t.Fatalf("expired probe_results were not cleaned up: %d %v", oldProbes, err)
 	}
 }

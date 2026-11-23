@@ -188,7 +188,7 @@ func (s *SQLStore) EnrollNode(ctx context.Context, params store.EnrollParams) (s
 
 func (s *SQLStore) AuthenticateAgent(ctx context.Context, tokenID, tokenHash string) (model.Node, model.AgentConfig, error) {
 	var nodeID, storedHash string
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT node_id, token_hash FROM agent_credentials WHERE token_id = ?`), tokenID).Scan(&nodeID, &storedHash)
+	err := s.readDB.QueryRowContext(ctx, s.q(`SELECT node_id, token_hash FROM agent_credentials WHERE token_id = ?`), tokenID).Scan(&nodeID, &storedHash)
 	if err != nil {
 		return model.Node{}, model.AgentConfig{}, store.ErrUnauthorized
 	}
@@ -218,7 +218,7 @@ func (s *SQLStore) ListLatencyNodes(ctx context.Context, includeHidden bool) ([]
 		args = append(args, s.boolArg(false))
 	}
 	query += ` ORDER BY weight DESC, node_group, name`
-	rows, err := s.db.QueryContext(ctx, s.q(query), args...)
+	rows, err := s.readDB.QueryContext(ctx, s.q(query), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -242,7 +242,7 @@ func (s *SQLStore) listNodesByRole(ctx context.Context, role model.NodeRole, inc
 		args = append(args, s.boolArg(false))
 	}
 	query += ` ORDER BY weight DESC, node_group, name`
-	rows, err := s.db.QueryContext(ctx, s.q(query), args...)
+	rows, err := s.readDB.QueryContext(ctx, s.q(query), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +259,7 @@ func (s *SQLStore) listNodesByRole(ctx context.Context, role model.NodeRole, inc
 }
 
 func (s *SQLStore) GetNode(ctx context.Context, id string) (model.Node, error) {
-	return scanNode(s.db.QueryRowContext(ctx, s.q(`SELECT `+nodeColumns+` FROM nodes WHERE id = ?`), id))
+	return scanNode(s.readDB.QueryRowContext(ctx, s.q(`SELECT `+nodeColumns+` FROM nodes WHERE id = ?`), id))
 }
 
 func (s *SQLStore) UpdateNode(ctx context.Context, node model.Node) error {
@@ -344,7 +344,7 @@ func scanAgentConfig(row rowScanner) (model.AgentConfig, error) {
 }
 
 func (s *SQLStore) AgentConfig(ctx context.Context, nodeID string) (model.AgentConfig, error) {
-	return scanAgentConfig(s.db.QueryRowContext(ctx, s.q(`SELECT config_json FROM agent_configs WHERE node_id = ?`), nodeID))
+	return scanAgentConfig(s.readDB.QueryRowContext(ctx, s.q(`SELECT config_json FROM agent_configs WHERE node_id = ?`), nodeID))
 }
 
 func (s *SQLStore) SaveAgentConfig(ctx context.Context, nodeID string, cfg model.AgentConfig) error {

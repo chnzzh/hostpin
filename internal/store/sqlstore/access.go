@@ -11,7 +11,7 @@ import (
 )
 
 func (s *SQLStore) ListSessions(ctx context.Context, adminID string) ([]store.Session, error) {
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT token_hash, admin_id, csrf_hash, ip_address, user_agent, created_at, expires_at FROM sessions WHERE admin_id = ? ORDER BY created_at DESC`), adminID)
+	rows, err := s.readDB.QueryContext(ctx, s.q(`SELECT token_hash, admin_id, csrf_hash, ip_address, user_agent, created_at, expires_at FROM sessions WHERE admin_id = ? ORDER BY created_at DESC`), adminID)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +47,7 @@ func (s *SQLStore) CreateAPIKey(ctx context.Context, record store.APIKeyRecord) 
 }
 
 func (s *SQLStore) ListAPIKeys(ctx context.Context, adminID string) ([]model.APIKey, error) {
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id, name, scopes_json, last_used_at, expires_at, created_at FROM api_keys WHERE admin_id = ? ORDER BY created_at DESC`), adminID)
+	rows, err := s.readDB.QueryContext(ctx, s.q(`SELECT id, name, scopes_json, last_used_at, expires_at, created_at FROM api_keys WHERE admin_id = ? ORDER BY created_at DESC`), adminID)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +129,7 @@ func (s *SQLStore) CreateShareLink(ctx context.Context, record store.ShareLinkRe
 }
 
 func (s *SQLStore) ListShareLinks(ctx context.Context) ([]model.ShareLink, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, node_ids, expires_at, created_at, revoked_at FROM share_links ORDER BY created_at DESC`)
+	rows, err := s.readDB.QueryContext(ctx, `SELECT id, node_ids, expires_at, created_at, revoked_at FROM share_links ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +166,7 @@ func scanShareLink(row rowScanner) (model.ShareLink, error) {
 }
 
 func (s *SQLStore) ResolveShareLink(ctx context.Context, tokenHash string, now time.Time) (model.ShareLink, error) {
-	link, err := scanShareLink(s.db.QueryRowContext(ctx, s.q(`SELECT id, node_ids, expires_at, created_at, revoked_at FROM share_links WHERE token_hash = ?`), tokenHash))
+	link, err := scanShareLink(s.readDB.QueryRowContext(ctx, s.q(`SELECT id, node_ids, expires_at, created_at, revoked_at FROM share_links WHERE token_hash = ?`), tokenHash))
 	if err != nil || link.RevokedAt != nil || !now.Before(link.ExpiresAt) {
 		return model.ShareLink{}, store.ErrNotFound
 	}

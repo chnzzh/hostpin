@@ -27,7 +27,7 @@ func scanAlertRule(row rowScanner) (model.AlertRule, error) {
 }
 
 func (s *SQLStore) ListAlertRules(ctx context.Context) ([]model.AlertRule, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, metric, operator, threshold, recovery_threshold, duration_seconds, cooldown_seconds, severity, scope_json, enabled, created_at, updated_at FROM alert_rules ORDER BY id`)
+	rows, err := s.readDB.QueryContext(ctx, `SELECT id, name, metric, operator, threshold, recovery_threshold, duration_seconds, cooldown_seconds, severity, scope_json, enabled, created_at, updated_at FROM alert_rules ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +96,7 @@ func (s *SQLStore) ListAlertEvents(ctx context.Context, limit int) ([]model.Aler
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id, node_id, node_json, event_type, status, severity, metric, value, threshold, message, link, occurred_at FROM alert_events ORDER BY occurred_at DESC LIMIT ?`), limit)
+	rows, err := s.readDB.QueryContext(ctx, s.q(`SELECT id, node_id, node_json, event_type, status, severity, metric, value, threshold, message, link, occurred_at FROM alert_events ORDER BY occurred_at DESC LIMIT ?`), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +152,7 @@ func scanNotificationChannel(row rowScanner) (model.NotificationChannel, error) 
 }
 
 func (s *SQLStore) ListNotificationChannels(ctx context.Context) ([]model.NotificationChannel, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, type, config_enc, enabled, created_at, updated_at FROM notification_channels ORDER BY id`)
+	rows, err := s.readDB.QueryContext(ctx, `SELECT id, name, type, config_enc, enabled, created_at, updated_at FROM notification_channels ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +253,7 @@ func (s *SQLStore) DueNotificationDeliveries(ctx context.Context, now time.Time,
 		JOIN notification_channels c ON c.id=d.channel_id
 		WHERE d.status IN ('pending','retry') AND d.next_attempt_at <= ? AND c.enabled = ` + s.enabledLiteral() + `
 		ORDER BY d.next_attempt_at LIMIT ?`
-	rows, err := s.db.QueryContext(ctx, s.q(query), millis(now), limit)
+	rows, err := s.readDB.QueryContext(ctx, s.q(query), millis(now), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -319,7 +319,7 @@ func (s *SQLStore) ListAudit(ctx context.Context, limit int) ([]model.AuditEntry
 	if limit <= 0 || limit > 2000 {
 		limit = 200
 	}
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT id, actor, action, target, detail, occurred_at FROM audit_log ORDER BY occurred_at DESC LIMIT ?`), limit)
+	rows, err := s.readDB.QueryContext(ctx, s.q(`SELECT id, actor, action, target, detail, occurred_at FROM audit_log ORDER BY occurred_at DESC LIMIT ?`), limit)
 	if err != nil {
 		return nil, err
 	}

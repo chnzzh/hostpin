@@ -14,7 +14,7 @@ import (
 
 func (s *SQLStore) SetupComplete(ctx context.Context) (bool, error) {
 	var count int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM admins`).Scan(&count); err != nil {
+	if err := s.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM admins`).Scan(&count); err != nil {
 		return false, err
 	}
 	return count > 0, nil
@@ -66,11 +66,11 @@ func (s *SQLStore) Initialize(ctx context.Context, admin store.Admin, enrollment
 }
 
 func (s *SQLStore) GetAdminByUsername(ctx context.Context, username string) (store.Admin, error) {
-	return s.scanAdmin(s.db.QueryRowContext(ctx, s.q(`SELECT id, username, password_hash, totp_secret_enc, recovery_hashes, created_at, updated_at FROM admins WHERE username = ?`), username))
+	return s.scanAdmin(s.readDB.QueryRowContext(ctx, s.q(`SELECT id, username, password_hash, totp_secret_enc, recovery_hashes, created_at, updated_at FROM admins WHERE username = ?`), username))
 }
 
 func (s *SQLStore) GetAdminByID(ctx context.Context, id string) (store.Admin, error) {
-	return s.scanAdmin(s.db.QueryRowContext(ctx, s.q(`SELECT id, username, password_hash, totp_secret_enc, recovery_hashes, created_at, updated_at FROM admins WHERE id = ?`), id))
+	return s.scanAdmin(s.readDB.QueryRowContext(ctx, s.q(`SELECT id, username, password_hash, totp_secret_enc, recovery_hashes, created_at, updated_at FROM admins WHERE id = ?`), id))
 }
 
 func (s *SQLStore) scanAdmin(row *sql.Row) (store.Admin, error) {
@@ -108,7 +108,7 @@ func (s *SQLStore) CreateSession(ctx context.Context, session store.Session) err
 func (s *SQLStore) GetSession(ctx context.Context, tokenHash string) (store.Session, error) {
 	var session store.Session
 	var createdAt, expiresAt int64
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT token_hash, admin_id, csrf_hash, ip_address, user_agent, created_at, expires_at FROM sessions WHERE token_hash = ?`), tokenHash).
+	err := s.readDB.QueryRowContext(ctx, s.q(`SELECT token_hash, admin_id, csrf_hash, ip_address, user_agent, created_at, expires_at FROM sessions WHERE token_hash = ?`), tokenHash).
 		Scan(&session.TokenHash, &session.AdminID, &session.CSRFHash, &session.IPAddress, &session.UserAgent, &createdAt, &expiresAt)
 	if err != nil {
 		return store.Session{}, mapSQLError(err)
@@ -134,7 +134,7 @@ func (s *SQLStore) DeleteExpiredSessions(ctx context.Context, now time.Time) err
 
 func (s *SQLStore) GetSetting(ctx context.Context, key string) (string, error) {
 	var value string
-	if err := s.db.QueryRowContext(ctx, s.q(`SELECT value FROM settings WHERE key = ?`), key).Scan(&value); err != nil {
+	if err := s.readDB.QueryRowContext(ctx, s.q(`SELECT value FROM settings WHERE key = ?`), key).Scan(&value); err != nil {
 		return "", mapSQLError(err)
 	}
 	return value, nil
