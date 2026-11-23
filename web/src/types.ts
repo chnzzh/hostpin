@@ -165,6 +165,7 @@ export interface ProbeTask {
   id: number
   name: string
   type: 'icmp' | 'tcp' | 'http' | 'dns'
+  ip_version?: 0 | 4 | 6
   target: string
   interval_seconds: number
   timeout_seconds: number
@@ -214,6 +215,7 @@ export interface LatencyProbeNode {
 export interface LatencyTarget {
   task_id: number
   node: PublicNode
+  ip_version: 4 | 6
   type: 'icmp' | 'tcp'
   interval_seconds: number
   samples: number
@@ -223,6 +225,8 @@ export interface LatencyResult {
   probe_node_id: string
   target_node_id: string
   task_id: number
+  ip_version?: 4 | 6
+  type?: 'icmp' | 'tcp'
   collected_at: string
   received_at: string
   success: boolean
