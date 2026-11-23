@@ -75,6 +75,7 @@ func (a *API) handleAdminUpdateNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "update_failed", "could not update node")
 		return
 	}
+	a.invalidateLatencyCache()
 	admin := adminFromContext(r.Context())
 	_ = a.store.AppendAudit(r.Context(), admin.Username, "node.update", node.ID, update.Name, time.Now().UTC())
 	updated, err := a.store.GetNode(r.Context(), node.ID)
@@ -108,6 +109,7 @@ func (a *API) handleAdminSetNodeLatency(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusInternalServerError, "update_failed", "could not update latency measurement capability")
 			return
 		}
+		a.invalidateLatencyCache()
 		a.revokeAgentStreams(node.ID)
 		admin := adminFromContext(r.Context())
 		action := "node.latency.disable"
@@ -145,6 +147,7 @@ func (a *API) handleAdminDeleteNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "delete_failed", "could not delete node")
 		return
 	}
+	a.invalidateLatencyCache()
 	a.revokeAgentStreams(id)
 	a.hub.Delete(id)
 	a.traffic.Delete(id)
@@ -615,5 +618,6 @@ func (a *API) handleAdminDeleteProbeTask(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "store_error", "could not delete probe task")
 		return
 	}
+	a.invalidateLatencyCache()
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -52,9 +52,13 @@ type API struct {
 	trustedProxies  []netip.Prefix
 	enrollmentCIDRs []netip.Prefix
 	allowedOrigins  map[string]struct{}
-	agentStreamsMu  sync.Mutex
-	agentStreams    map[string]map[chan struct{}]struct{}
-	recordEnabled   atomic.Bool
+	agentStreamsMu       sync.Mutex
+	agentStreams         map[string]map[chan struct{}]struct{}
+	latencyCacheMu       sync.Mutex
+	latencyCacheGen      uint64
+	latencyCache         [2]latencyCacheEntry
+	latencyOverviewCalls [2]*latencyOverviewCall
+	recordEnabled        atomic.Bool
 	shutdown        chan struct{}
 	shutdownOnce    sync.Once
 }

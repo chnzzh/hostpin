@@ -10,10 +10,17 @@ import (
 	"github.com/chnzzh/hostpin/internal/model"
 )
 
+const maxPersistBatch = 128
+
 type persistenceStore interface {
 	Ping(context.Context) error
 	SaveMetric(context.Context, model.MetricSample) error
 	SaveProbeResult(context.Context, model.ProbeResult) error
+}
+
+type batchPersistenceStore interface {
+	SaveMetricsBatch(context.Context, []model.MetricSample) error
+	SaveProbeResultsBatch(context.Context, []model.ProbeResult) error
 }
 
 type persistItem struct {
@@ -44,8 +51,9 @@ func (p *Persister) Start(ctx context.Context) {
 				p.drain(nil)
 				return
 			case item := <-p.queue:
-				if !p.persist(ctx, item) {
-					p.drain(&item)
+				batch := p.dequeueBatch(&item)
+				if remaining := p.persistBatch(ctx, batch); len(remaining) > 0 {
+					p.drain(remaining)
 					return
 				}
 			}
@@ -122,19 +130,117 @@ func (p *Persister) write(ctx context.Context, item persistItem) error {
 	return nil
 }
 
-func (p *Persister) drain(pending *persistItem) {
-	deadline, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if pending != nil && !p.persist(deadline, *pending) {
-		return
+func (p *Persister) dequeueBatch(first *persistItem) []persistItem {
+	var batch []persistItem
+	if first != nil {
+		batch = make([]persistItem, 1, maxPersistBatch)
+		batch[0] = *first
 	}
-	for {
+	for len(batch) < maxPersistBatch {
 		select {
 		case item := <-p.queue:
-			if !p.persist(deadline, item) {
-				return
+			if batch == nil {
+				batch = make([]persistItem, 0, maxPersistBatch)
 			}
+			batch = append(batch, item)
 		default:
+			return batch
+		}
+	}
+	return batch
+}
+
+func remainingPersistItems(metrics []model.MetricSample, probes []model.ProbeResult) []persistItem {
+	remaining := make([]persistItem, 0, len(metrics)+len(probes))
+	for i := range metrics {
+		sample := metrics[i]
+		remaining = append(remaining, persistItem{sample: &sample})
+	}
+	for i := range probes {
+		probe := probes[i]
+		remaining = append(remaining, persistItem{probe: &probe})
+	}
+	return remaining
+}
+
+func (p *Persister) persistBatch(ctx context.Context, batch []persistItem) []persistItem {
+	if len(batch) == 0 {
+		return nil
+	}
+	batchStore, canBatch := p.store.(batchPersistenceStore)
+	if !canBatch || len(batch) == 1 {
+		for i, item := range batch {
+			if !p.persist(ctx, item) {
+				return batch[i:]
+			}
+		}
+		return nil
+	}
+
+	var metrics []model.MetricSample
+	var probes []model.ProbeResult
+	for _, item := range batch {
+		if item.sample != nil {
+			metrics = append(metrics, *item.sample)
+		}
+		if item.probe != nil {
+			probes = append(probes, *item.probe)
+		}
+	}
+
+	if len(metrics) == 1 {
+		sample := metrics[0]
+		if !p.persist(ctx, persistItem{sample: &sample}) {
+			return remainingPersistItems(metrics, probes)
+		}
+	} else if len(metrics) > 1 {
+		if err := batchStore.SaveMetricsBatch(ctx, metrics); err == nil {
+			p.degraded.Store(false)
+		} else {
+			for i := range metrics {
+				sample := metrics[i]
+				if !p.persist(ctx, persistItem{sample: &sample}) {
+					return remainingPersistItems(metrics[i:], probes)
+				}
+			}
+		}
+	}
+
+	if len(probes) == 1 {
+		probe := probes[0]
+		if !p.persist(ctx, persistItem{probe: &probe}) {
+			return remainingPersistItems(nil, probes)
+		}
+	} else if len(probes) > 1 {
+		if err := batchStore.SaveProbeResultsBatch(ctx, probes); err == nil {
+			p.degraded.Store(false)
+		} else {
+			for i := range probes {
+				probe := probes[i]
+				if !p.persist(ctx, persistItem{probe: &probe}) {
+					return remainingPersistItems(nil, probes[i:])
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (p *Persister) drain(pending []persistItem) {
+	deadline, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if len(pending) > 0 {
+		if len(p.persistBatch(deadline, pending)) > 0 {
+			return
+		}
+	}
+	for {
+		batch := p.dequeueBatch(nil)
+		if len(batch) == 0 {
+			return
+		}
+		if len(p.persistBatch(deadline, batch)) > 0 {
 			return
 		}
 	}
