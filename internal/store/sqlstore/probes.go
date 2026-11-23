@@ -17,7 +17,7 @@ func scanProbeTask(row rowScanner) (model.ProbeTask, error) {
 	var task model.ProbeTask
 	var rawNodeIDs string
 	var createdAt, updatedAt int64
-	err := row.Scan(&task.ID, &task.Name, &task.Type, &task.Target, &task.IntervalSeconds,
+	err := row.Scan(&task.ID, &task.Name, &task.Type, &task.IPVersion, &task.Target, &task.IntervalSeconds,
 		&task.TimeoutSeconds, &task.ExpectedStatus, &task.ExpectedValue, &rawNodeIDs,
 		&task.Purpose, &task.RunOn, &task.TargetNodeID, &task.Public, &task.Samples,
 		&task.Enabled, &createdAt, &updatedAt)
@@ -30,6 +30,9 @@ func scanProbeTask(row rowScanner) (model.ProbeTask, error) {
 	}
 	if task.Purpose == "" {
 		task.Purpose = "custom"
+	}
+	if task.Purpose == model.ProbePurposeLatency && task.IPVersion != model.ProbeIPVersion4 && task.IPVersion != model.ProbeIPVersion6 {
+		task.IPVersion = model.InferLatencyIPVersion(task.Target)
 	}
 	task.RunOn = model.NormalizeNodeRole(task.RunOn)
 	if task.Samples <= 0 {
@@ -57,7 +60,7 @@ func (s *SQLStore) listProbeTasks(ctx context.Context, nodeID string, enabledOnl
 			return nil, err
 		}
 	}
-	query := `SELECT id, name, type, target, interval_seconds, timeout_seconds, expected_status, expected_value, node_ids, purpose, run_on, target_node_id, public, samples, enabled, created_at, updated_at FROM probe_tasks`
+	query := `SELECT id, name, type, ip_version, target, interval_seconds, timeout_seconds, expected_status, expected_value, node_ids, purpose, run_on, target_node_id, public, samples, enabled, created_at, updated_at FROM probe_tasks`
 	if enabledOnly {
 		query += ` WHERE enabled = ` + s.enabledLiteral()
 	}
@@ -102,13 +105,19 @@ func (s *SQLStore) SaveProbeTask(ctx context.Context, task model.ProbeTask) (mod
 	if task.Purpose == "" {
 		task.Purpose = "custom"
 	}
+	if !model.ValidProbeIPVersion(task.IPVersion) {
+		return model.ProbeTask{}, fmt.Errorf("invalid ip_version %d", task.IPVersion)
+	}
+	if task.Purpose == model.ProbePurposeLatency && task.IPVersion == model.ProbeIPVersionAuto {
+		task.IPVersion = model.InferLatencyIPVersion(task.Target)
+	}
 	task.RunOn = model.NormalizeNodeRole(task.RunOn)
 	if task.Samples <= 0 {
 		task.Samples = 1
 	}
 	if task.ID == 0 {
-		query := `INSERT INTO probe_tasks(name, type, target, interval_seconds, timeout_seconds, expected_status, expected_value, node_ids, purpose, run_on, target_node_id, public, samples, enabled, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
-		err := s.db.QueryRowContext(ctx, s.q(query), task.Name, task.Type, task.Target,
+		query := `INSERT INTO probe_tasks(name, type, ip_version, target, interval_seconds, timeout_seconds, expected_status, expected_value, node_ids, purpose, run_on, target_node_id, public, samples, enabled, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+		err := s.db.QueryRowContext(ctx, s.q(query), task.Name, task.Type, task.IPVersion, task.Target,
 			task.IntervalSeconds, task.TimeoutSeconds, task.ExpectedStatus, task.ExpectedValue,
 			encodeJSON(task.NodeIDs), task.Purpose, task.RunOn, task.TargetNodeID,
 			s.boolArg(task.Public), task.Samples, s.boolArg(task.Enabled), millis(now), millis(now)).Scan(&task.ID)
@@ -119,8 +128,8 @@ func (s *SQLStore) SaveProbeTask(ctx context.Context, task model.ProbeTask) (mod
 		task.UpdatedAt = now
 		return task, nil
 	}
-	query := `UPDATE probe_tasks SET name=?, type=?, target=?, interval_seconds=?, timeout_seconds=?, expected_status=?, expected_value=?, node_ids=?, purpose=?, run_on=?, target_node_id=?, public=?, samples=?, enabled=?, updated_at=? WHERE id=?`
-	result, err := s.db.ExecContext(ctx, s.q(query), task.Name, task.Type, task.Target,
+	query := `UPDATE probe_tasks SET name=?, type=?, ip_version=?, target=?, interval_seconds=?, timeout_seconds=?, expected_status=?, expected_value=?, node_ids=?, purpose=?, run_on=?, target_node_id=?, public=?, samples=?, enabled=?, updated_at=? WHERE id=?`
+	result, err := s.db.ExecContext(ctx, s.q(query), task.Name, task.Type, task.IPVersion, task.Target,
 		task.IntervalSeconds, task.TimeoutSeconds, task.ExpectedStatus, task.ExpectedValue,
 		encodeJSON(task.NodeIDs), task.Purpose, task.RunOn, task.TargetNodeID,
 		s.boolArg(task.Public), task.Samples, s.boolArg(task.Enabled), millis(now), task.ID)

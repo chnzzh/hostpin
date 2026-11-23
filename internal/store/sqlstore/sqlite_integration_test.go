@@ -372,11 +372,11 @@ func TestSQLiteLatencyProbeRolesDispatchAndHistory(t *testing.T) {
 		t.Fatalf("Probe Node received the wrong tasks: %#v %v", probeTasks, err)
 	}
 	if _, err := repository.SaveProbeTask(ctx, model.ProbeTask{
-		Name: "duplicate", Type: model.ProbeTCP, Target: "203.0.113.40:443",
+		Name: "duplicate", Type: model.ProbeICMP, IPVersion: 4, Target: "203.0.113.41",
 		IntervalSeconds: 30, TimeoutSeconds: 2, Purpose: "latency",
 		RunOn: model.NodeRoleProbe, TargetNodeID: monitor.Node.ID, Samples: 3, Enabled: true,
 	}); err == nil {
-		t.Fatal("duplicate latency target was accepted")
+		t.Fatal("duplicate (target_node_id, ip_version, type) latency target was accepted")
 	}
 
 	for index, loss := range []float64{33.333, 0} {
@@ -893,4 +893,170 @@ func TestDeleteNodeAndProbeTaskBatchedCleanup(t *testing.T) {
 	assertOne(`SELECT COUNT(*) FROM metrics_5m WHERE node_id = ?`, keeperRes.Node.ID)
 	assertOne(`SELECT COUNT(*) FROM metrics_1h WHERE node_id = ?`, keeperRes.Node.ID)
 	assertOne(`SELECT COUNT(*) FROM alert_events WHERE node_id = ?`, keeperRes.Node.ID)
+}
+
+func TestSQLiteDualStackLatencyMigrationAndTaskIsolation(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "dualstack-upgrade.db")
+	database, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrations, err := store.Migrations("sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range migrations {
+		if migration.Version >= 12 {
+			break
+		}
+		transaction, err := database.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, statement := range strings.Split(migration.SQL, "-- hostpin:split") {
+			if strings.TrimSpace(statement) == "" {
+				continue
+			}
+			if _, err := transaction.ExecContext(ctx, statement); err != nil {
+				transaction.Rollback()
+				t.Fatalf("apply pre-v12 migration %s: %v", migration.Name, err)
+			}
+		}
+		if _, err := transaction.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)`, migration.Version, time.Now().UnixMilli()); err != nil {
+			transaction.Rollback()
+			t.Fatal(err)
+		}
+		if err := transaction.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if _, err := database.ExecContext(ctx, `INSERT INTO nodes(id, role, latency_enabled, name, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)`,
+		"mon-v4", model.NodeRoleMonitor, 0, "Monitor v4", now.UnixMilli(), now.UnixMilli(),
+		"mon-v6-tcp", model.NodeRoleMonitor, 0, "Monitor v6 TCP", now.UnixMilli(), now.UnixMilli(),
+		"mon-v6-icmp", model.NodeRoleMonitor, 0, "Monitor v6 ICMP", now.UnixMilli(), now.UnixMilli(),
+		"probe-1", model.NodeRoleProbe, 1, "Probe 1", now.UnixMilli(), now.UnixMilli(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	insertPreV12Task := `INSERT INTO probe_tasks(name, type, target, interval_seconds, timeout_seconds, expected_status, expected_value, node_ids, purpose, run_on, target_node_id, public, samples, enabled, created_at, updated_at) VALUES(?, ?, ?, ?, ?, 0, '', '[]', ?, ?, ?, 1, 3, 1, ?, ?)`
+	for _, row := range []struct {
+		name, typ, target, purpose, runOn, targetNodeID string
+	}{
+		{"legacy-v4", "icmp", "203.0.113.10", "latency", "probe", "mon-v4"},
+		{"legacy-v6-tcp", "tcp", "[2001:db8::10]:443", "latency", "probe", "mon-v6-tcp"},
+		{"legacy-v6-icmp", "icmp", "2001:db8::20", "latency", "probe", "mon-v6-icmp"},
+		{"legacy-custom", "tcp", "[2001:db8::30]:443", "custom", "monitor", ""},
+	} {
+		if _, err := database.ExecContext(ctx, insertPreV12Task, row.name, row.typ, row.target, 30, 3, row.purpose, row.runOn, row.targetNodeID, now.UnixMilli(), now.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	repository, err := Open(ctx, config.DatabaseConfig{Driver: "sqlite", DSN: dbPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repository.Close()
+
+	// Verify old index was dropped and v2 index exists.
+	var oldIdx, newIdx int
+	if err := repository.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_probe_tasks_latency_target'`).Scan(&oldIdx); err != nil || oldIdx != 0 {
+		t.Fatalf("expected old idx_probe_tasks_latency_target to be dropped, count=%d err=%v", oldIdx, err)
+	}
+	if err := repository.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_probe_tasks_latency_target_v2'`).Scan(&newIdx); err != nil || newIdx != 1 {
+		t.Fatalf("expected idx_probe_tasks_latency_target_v2, count=%d err=%v", newIdx, err)
+	}
+
+	tasks, err := repository.ListAllProbeTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]model.ProbeTask, len(tasks))
+	for _, task := range tasks {
+		byName[task.Name] = task
+	}
+	if byName["legacy-v4"].IPVersion != 4 || byName["legacy-v6-tcp"].IPVersion != 6 || byName["legacy-v6-icmp"].IPVersion != 6 || byName["legacy-custom"].IPVersion != 0 {
+		t.Fatalf("unexpected migrated ip_version backfill: %#v", byName)
+	}
+
+	// Verify all 4 (ip_version, type) combinations coexist on one server while duplicates fail.
+	v4ICMP := byName["legacy-v4"]
+	v4TCP, err := repository.SaveProbeTask(ctx, model.ProbeTask{
+		Name: "v4-tcp", Type: model.ProbeTCP, IPVersion: 4, Target: "203.0.113.10:443",
+		IntervalSeconds: 30, TimeoutSeconds: 3, Purpose: model.ProbePurposeLatency,
+		RunOn: model.NodeRoleProbe, TargetNodeID: "mon-v4", Public: true, Samples: 3, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v6ICMP, err := repository.SaveProbeTask(ctx, model.ProbeTask{
+		Name: "v6-icmp", Type: model.ProbeICMP, IPVersion: 6, Target: "2001:db8::10",
+		IntervalSeconds: 30, TimeoutSeconds: 3, Purpose: model.ProbePurposeLatency,
+		RunOn: model.NodeRoleProbe, TargetNodeID: "mon-v4", Public: true, Samples: 3, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v6TCP, err := repository.SaveProbeTask(ctx, model.ProbeTask{
+		Name: "v6-tcp", Type: model.ProbeTCP, IPVersion: 6, Target: "[2001:db8::10]:443",
+		IntervalSeconds: 30, TimeoutSeconds: 3, Purpose: model.ProbePurposeLatency,
+		RunOn: model.NodeRoleProbe, TargetNodeID: "mon-v4", Public: true, Samples: 3, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.SaveProbeTask(ctx, model.ProbeTask{
+		Name: "dup-v6-tcp", Type: model.ProbeTCP, IPVersion: 6, Target: "[2001:db8::99]:443",
+		IntervalSeconds: 30, TimeoutSeconds: 3, Purpose: model.ProbePurposeLatency,
+		RunOn: model.NodeRoleProbe, TargetNodeID: "mon-v4", Public: true, Samples: 3, Enabled: true,
+	}); err == nil {
+		t.Fatal("expected duplicate (mon-v4, 6, tcp) latency task to fail unique constraint")
+	}
+
+	if err := repository.SaveProbeResultsBatch(ctx, []model.ProbeResult{
+		{NodeID: "probe-1", TaskID: v4ICMP.ID, ReceivedAt: now.Add(-2 * time.Minute), CollectedAt: now.Add(-2 * time.Minute), Success: true, LatencyMS: 10, LossPercent: 0},
+		{NodeID: "probe-1", TaskID: v4ICMP.ID, ReceivedAt: now.Add(-time.Minute), CollectedAt: now.Add(-time.Minute), Success: true, LatencyMS: 20, LossPercent: 0},
+		{NodeID: "probe-1", TaskID: v4TCP.ID, ReceivedAt: now.Add(-time.Minute), CollectedAt: now.Add(-time.Minute), Success: true, LatencyMS: 35, LossPercent: 0},
+		{NodeID: "probe-1", TaskID: v6ICMP.ID, ReceivedAt: now.Add(-time.Minute), CollectedAt: now.Add(-time.Minute), Success: false, LatencyMS: -1, LossPercent: 100, Error: "timeout"},
+		{NodeID: "probe-1", TaskID: v6TCP.ID, ReceivedAt: now.Add(-time.Minute), CollectedAt: now.Add(-time.Minute), Success: true, LatencyMS: 42, LossPercent: 0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	latest, err := repository.LatestLatencyResults(ctx, now.Add(-time.Hour))
+	if err != nil || len(latest) != 4 {
+		t.Fatalf("LatestLatencyResults = %#v, err=%v", latest, err)
+	}
+	latestByTask := make(map[int64]model.LatencyResult, 4)
+	for _, r := range latest {
+		latestByTask[r.TaskID] = r
+	}
+	if latestByTask[v4ICMP.ID].IPVersion != 4 || latestByTask[v4ICMP.ID].Type != model.ProbeICMP ||
+		latestByTask[v4TCP.ID].IPVersion != 4 || latestByTask[v4TCP.ID].Type != model.ProbeTCP ||
+		latestByTask[v6ICMP.ID].IPVersion != 6 || latestByTask[v6ICMP.ID].Type != model.ProbeICMP ||
+		latestByTask[v6TCP.ID].IPVersion != 6 || latestByTask[v6TCP.ID].Type != model.ProbeTCP {
+		t.Fatalf("LatestLatencyResults missing IPVersion/Type metadata: %#v", latestByTask)
+	}
+
+	v4ICMPHist, err := repository.LatencyTaskHistory(ctx, "probe-1", v4ICMP.ID, now.Add(-time.Hour), now.Add(time.Hour), 100)
+	if err != nil || len(v4ICMPHist) != 2 || v4ICMPHist[0].LatencyMS != 10 || v4ICMPHist[1].LatencyMS != 20 || v4ICMPHist[0].IPVersion != 4 || v4ICMPHist[0].Type != model.ProbeICMP {
+		t.Fatalf("LatencyTaskHistory(v4ICMP) = %#v, err=%v", v4ICMPHist, err)
+	}
+	v4ICMPSum, err := repository.LatencyTaskWindowSummary(ctx, "probe-1", v4ICMP.ID, now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil || v4ICMPSum.SampleCount != 2 || v4ICMPSum.SuccessCount != 2 || v4ICMPSum.AverageLatencyMS != 15 {
+		t.Fatalf("LatencyTaskWindowSummary(v4ICMP) = %#v, err=%v", v4ICMPSum, err)
+	}
+	v6ICMPSum, err := repository.LatencyTaskWindowSummary(ctx, "probe-1", v6ICMP.ID, now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil || v6ICMPSum.SampleCount != 1 || v6ICMPSum.SuccessCount != 0 || v6ICMPSum.AverageLatencyMS != 999 || v6ICMPSum.AverageLossPercent != 100 {
+		t.Fatalf("LatencyTaskWindowSummary(v6ICMP all-failed) = %#v, err=%v", v6ICMPSum, err)
+	}
+	v6TCPHist, err := repository.LatencyTaskHistory(ctx, "probe-1", v6TCP.ID, now.Add(-time.Hour), now.Add(time.Hour), 100)
+	if err != nil || len(v6TCPHist) != 1 || v6TCPHist[0].LatencyMS != 42 || v6TCPHist[0].IPVersion != 6 || v6TCPHist[0].Type != model.ProbeTCP {
+		t.Fatalf("LatencyTaskHistory(v6TCP) = %#v, err=%v", v6TCPHist, err)
+	}
 }

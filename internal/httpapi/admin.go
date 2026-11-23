@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"math/big"
-	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -532,6 +531,11 @@ func (a *API) handleAdminSaveProbeTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_probe", err.Error())
 		return
 	}
+	if task.Type == model.ProbeICMP {
+		task.Target, _ = model.NormalizeICMPTarget(task.Target, task.IPVersion)
+	} else if task.Type == model.ProbeTCP {
+		task.Target, _ = model.ValidateTCPTarget(task.Target, task.IPVersion)
+	}
 	for _, nodeID := range task.NodeIDs {
 		node, err := a.store.GetNode(r.Context(), nodeID)
 		if err != nil || node.Role != model.NodeRoleMonitor {
@@ -573,14 +577,21 @@ func validateProbeTask(task model.ProbeTask) error {
 	if task.Samples != 0 && (task.Samples < 1 || task.Samples > 10) {
 		return errors.New("probe samples must be between 1 and 10")
 	}
+	if !model.ValidProbeIPVersion(task.IPVersion) {
+		return errors.New("ip_version must be 0, 4, or 6")
+	}
 	switch task.Type {
-	case model.ProbeICMP, model.ProbeDNS:
+	case model.ProbeICMP:
+		if _, err := model.NormalizeICMPTarget(task.Target, task.IPVersion); err != nil {
+			return err
+		}
+	case model.ProbeDNS:
 		if strings.ContainsAny(strings.TrimSpace(task.Target), " /\\") {
 			return errors.New("ICMP and DNS targets must be host names or addresses")
 		}
 	case model.ProbeTCP:
-		if _, _, err := net.SplitHostPort(task.Target); err != nil {
-			return errors.New("TCP target must use host:port")
+		if _, err := model.ValidateTCPTarget(task.Target, task.IPVersion); err != nil {
+			return err
 		}
 	case model.ProbeHTTP:
 		parsed, err := url.Parse(task.Target)

@@ -167,6 +167,8 @@ type ProbeRepository interface {
 	LatestLatencyResults(context.Context, time.Time) ([]model.LatencyResult, error)
 	LatencyHistory(context.Context, string, string, time.Time, time.Time, int) ([]model.LatencyResult, error)
 	LatencyWindowSummary(context.Context, string, string, time.Time, time.Time) (model.LatencyWindowSummary, error)
+	LatencyTaskHistory(context.Context, string, int64, time.Time, time.Time, int) ([]model.LatencyResult, error)
+	LatencyTaskWindowSummary(context.Context, string, int64, time.Time, time.Time) (model.LatencyWindowSummary, error)
 }
 
 // AlertRepository owns rules, immutable event snapshots, and durable deliveries.

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os/exec"
 	"regexp"
@@ -71,9 +72,9 @@ func runAttempt(parent context.Context, task model.ProbeTask) (string, int, floa
 	var err error
 	switch task.Type {
 	case model.ProbeICMP:
-		value, err = runICMP(ctx, task.Target)
+		value, err = runICMP(ctx, task.Target, task.IPVersion, task.TimeoutSeconds)
 	case model.ProbeTCP:
-		value, err = runTCP(ctx, task.Target)
+		value, err = runTCP(ctx, task.Target, task.IPVersion)
 	case model.ProbeHTTP:
 		value, status, err = runHTTP(ctx, task)
 	case model.ProbeDNS:
@@ -111,11 +112,19 @@ func parseICMPLatency(output string, fallback float64) float64 {
 	return value
 }
 
-func runTCP(ctx context.Context, target string) (string, error) {
-	if _, _, err := net.SplitHostPort(target); err != nil {
-		return "", errors.New("TCP target must be host:port")
+func runTCP(ctx context.Context, target string, ipVersion int) (string, error) {
+	normalized, err := model.ValidateTCPTarget(target, ipVersion)
+	if err != nil {
+		return "", err
 	}
-	connection, err := (&net.Dialer{}).DialContext(ctx, "tcp", target)
+	network := "tcp"
+	switch ipVersion {
+	case model.ProbeIPVersion4:
+		network = "tcp4"
+	case model.ProbeIPVersion6:
+		network = "tcp6"
+	}
+	connection, err := (&net.Dialer{}).DialContext(ctx, network, normalized)
 	if err != nil {
 		return "", err
 	}
@@ -176,30 +185,130 @@ func runDNS(ctx context.Context, target string) (string, error) {
 	return strings.Join(addresses, ","), nil
 }
 
-func runICMP(ctx context.Context, target string) (string, error) {
-	hostname := strings.TrimSpace(target)
-	if hostname == "" || strings.ContainsAny(hostname, " /\\") {
-		return "", errors.New("invalid ICMP target")
+type icmpCommandSpec struct {
+	primaryBin   string
+	primaryArgs  []string
+	fallbackBin  string
+	fallbackArgs []string
+}
+
+func resolveICMPFamily(host string, ipVersion int) int {
+	if ipVersion == model.ProbeIPVersion4 || ipVersion == model.ProbeIPVersion6 {
+		return ipVersion
 	}
-	path, err := exec.LookPath("ping")
-	if err != nil {
-		return "", errors.New("ping utility is unavailable")
+	if addr, err := netip.ParseAddr(host); err == nil && addr.Is6() {
+		return model.ProbeIPVersion6
 	}
-	var arguments []string
-	switch runtime.GOOS {
+	return model.ProbeIPVersionAuto
+}
+
+func buildICMPCommand(goos string, family int, host string, timeoutSeconds int, lookPath func(string) (string, error)) (icmpCommandSpec, error) {
+	timeoutSec := strconv.Itoa(max(timeoutSeconds, 1))
+	timeoutMS := strconv.Itoa(max(timeoutSeconds, 1) * 1000)
+
+	switch goos {
 	case "windows":
-		arguments = []string{"-n", "1", "-w", "1000", hostname}
-	case "darwin", "freebsd":
-		arguments = []string{"-n", "-c", "1", "-W", "1000", hostname}
+		path, err := lookPath("ping")
+		if err != nil {
+			return icmpCommandSpec{}, errors.New("ping utility is unavailable")
+		}
+		var arguments []string
+		switch family {
+		case model.ProbeIPVersion4:
+			arguments = []string{"-4", "-n", "1", "-w", timeoutMS, host}
+		case model.ProbeIPVersion6:
+			arguments = []string{"-6", "-n", "1", "-w", timeoutMS, host}
+		default:
+			arguments = []string{"-n", "1", "-w", timeoutMS, host}
+		}
+		return icmpCommandSpec{primaryBin: path, primaryArgs: arguments}, nil
+	case "darwin":
+		if family == model.ProbeIPVersion6 {
+			path, err := lookPath("ping6")
+			if err != nil {
+				return icmpCommandSpec{}, errors.New("ping6 utility is unavailable")
+			}
+			// macOS ping6 treats -W as an NIQ flag rather than a wait timeout; rely on ctx.
+			return icmpCommandSpec{primaryBin: path, primaryArgs: []string{"-n", "-c", "1", host}}, nil
+		}
+		path, err := lookPath("ping")
+		if err != nil {
+			return icmpCommandSpec{}, errors.New("ping utility is unavailable")
+		}
+		return icmpCommandSpec{primaryBin: path, primaryArgs: []string{"-n", "-c", "1", "-W", timeoutMS, host}}, nil
+	case "freebsd":
+		if family == model.ProbeIPVersion6 {
+			if path, err := lookPath("ping6"); err == nil {
+				return icmpCommandSpec{primaryBin: path, primaryArgs: []string{"-n", "-c", "1", host}}, nil
+			}
+			if path, err := lookPath("ping"); err == nil {
+				return icmpCommandSpec{primaryBin: path, primaryArgs: []string{"-6", "-n", "-c", "1", "-W", timeoutMS, host}}, nil
+			}
+			return icmpCommandSpec{}, errors.New("ping6 utility is unavailable")
+		}
+		path, err := lookPath("ping")
+		if err != nil {
+			return icmpCommandSpec{}, errors.New("ping utility is unavailable")
+		}
+		if family == model.ProbeIPVersion4 {
+			return icmpCommandSpec{primaryBin: path, primaryArgs: []string{"-4", "-n", "-c", "1", "-W", timeoutMS, host}}, nil
+		}
+		return icmpCommandSpec{primaryBin: path, primaryArgs: []string{"-n", "-c", "1", "-W", timeoutMS, host}}, nil
 	default:
-		arguments = []string{"-n", "-c", "1", "-W", "1", hostname}
+		if family == model.ProbeIPVersion6 {
+			pingPath, pingErr := lookPath("ping")
+			ping6Path, ping6Err := lookPath("ping6")
+			if pingErr == nil {
+				spec := icmpCommandSpec{
+					primaryBin:  pingPath,
+					primaryArgs: []string{"-6", "-n", "-c", "1", "-W", timeoutSec, host},
+				}
+				if ping6Err == nil {
+					spec.fallbackBin = ping6Path
+					spec.fallbackArgs = []string{"-n", "-c", "1", "-W", timeoutSec, host}
+				}
+				return spec, nil
+			}
+			if ping6Err == nil {
+				return icmpCommandSpec{primaryBin: ping6Path, primaryArgs: []string{"-n", "-c", "1", "-W", timeoutSec, host}}, nil
+			}
+			return icmpCommandSpec{}, errors.New("ping6 utility is unavailable")
+		}
+		path, err := lookPath("ping")
+		if err != nil {
+			return icmpCommandSpec{}, errors.New("ping utility is unavailable")
+		}
+		if family == model.ProbeIPVersion4 {
+			return icmpCommandSpec{primaryBin: path, primaryArgs: []string{"-4", "-n", "-c", "1", "-W", timeoutSec, host}}, nil
+		}
+		return icmpCommandSpec{primaryBin: path, primaryArgs: []string{"-n", "-c", "1", "-W", timeoutSec, host}}, nil
 	}
-	output, err := exec.CommandContext(ctx, path, arguments...).CombinedOutput()
+}
+
+func runICMP(ctx context.Context, target string, ipVersion, timeoutSeconds int) (string, error) {
+	hostname, err := model.NormalizeICMPTarget(target, ipVersion)
+	if err != nil {
+		return "", err
+	}
+	family := resolveICMPFamily(hostname, ipVersion)
+	spec, err := buildICMPCommand(runtime.GOOS, family, hostname, timeoutSeconds, exec.LookPath)
+	if err != nil {
+		return "", err
+	}
+	return executeICMPCommand(ctx, spec, func(runCtx context.Context, bin string, args []string) ([]byte, error) {
+		return exec.CommandContext(runCtx, bin, args...).CombinedOutput()
+	})
+}
+
+func executeICMPCommand(ctx context.Context, spec icmpCommandSpec, runCmd func(context.Context, string, []string) ([]byte, error)) (string, error) {
+	output, err := runCmd(ctx, spec.primaryBin, spec.primaryArgs)
+	if err != nil && spec.fallbackBin != "" && ctx.Err() == nil {
+		output, err = runCmd(ctx, spec.fallbackBin, spec.fallbackArgs)
+	}
 	if err != nil {
 		return "", fmt.Errorf("ICMP failed: %w", err)
 	}
-	line := firstUsefulLine(string(output))
-	return line, nil
+	return firstUsefulLine(string(output)), nil
 }
 
 func firstUsefulLine(value string) string {

@@ -136,6 +136,34 @@ func TestEnrollmentAndProbeValidation(t *testing.T) {
 	if validateProbeTask(validProbe) == nil {
 		t.Fatal("malformed TCP target was accepted")
 	}
+
+	if got := model.InferLatencyIPVersion("[2001:db8::1]:443"); got != 6 {
+		t.Fatalf("InferLatencyIPVersion([2001:db8::1]:443) = %d, want 6", got)
+	}
+	if got := model.InferLatencyIPVersion("2001:db8::1"); got != 6 {
+		t.Fatalf("InferLatencyIPVersion(2001:db8::1) = %d, want 6", got)
+	}
+	if got := model.InferLatencyIPVersion("edge.example.com:443"); got != 4 {
+		t.Fatalf("InferLatencyIPVersion(edge.example.com:443) = %d, want 4", got)
+	}
+	if normalized, err := model.NormalizeICMPTarget("[2001:db8::1]", 6); err != nil || normalized != "2001:db8::1" {
+		t.Fatalf("NormalizeICMPTarget([2001:db8::1], 6) = (%q, %v)", normalized, err)
+	}
+	if _, err := model.NormalizeICMPTarget("[2001:db8::1]:443", 6); err == nil {
+		t.Fatal("ICMP target with port was accepted")
+	}
+	if _, err := model.NormalizeICMPTarget("example.com:443", 4); err == nil {
+		t.Fatal("ICMP hostname target with port was accepted")
+	}
+	if _, err := model.ValidateTCPTarget("[2001:db8::1]:443", 4); err == nil {
+		t.Fatal("IPv6 TCP target with ip_version=4 was accepted")
+	}
+	if _, err := model.ValidateTCPTarget("192.0.2.1:443", 6); err == nil {
+		t.Fatal("IPv4 TCP target with ip_version=6 was accepted")
+	}
+	if _, err := model.ValidateTCPTarget("example.com:0", 4); err == nil {
+		t.Fatal("TCP target with port 0 was accepted")
+	}
 }
 
 func TestLatencyDownsamplingAndTaskAuthorization(t *testing.T) {

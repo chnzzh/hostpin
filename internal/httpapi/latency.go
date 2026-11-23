@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -157,9 +158,11 @@ func (a *API) loadLatencyOverview(ctx context.Context, authenticated bool) (mode
 		return model.LatencyOverview{}, err
 	}
 	visibleTargets := make(map[string]model.Node, len(nodes))
-	for _, node := range nodes {
+	nodeOrder := make(map[string]int, len(nodes))
+	for index, node := range nodes {
 		if authenticated || !node.Hidden {
 			visibleTargets[node.ID] = node
+			nodeOrder[node.ID] = index
 		}
 	}
 	tasks, err := a.store.ListProbeTasks(ctx, "")
@@ -167,21 +170,47 @@ func (a *API) loadLatencyOverview(ctx context.Context, authenticated bool) (mode
 		return model.LatencyOverview{}, err
 	}
 	publicTargets := make([]model.LatencyTarget, 0)
-	visibleTasks := make(map[int64]struct{})
+	visibleTasks := make(map[int64]model.ProbeTask)
 	for _, task := range tasks {
-		if task.Purpose != "latency" || (!authenticated && !task.Public) {
+		if task.Purpose != model.ProbePurposeLatency || (!authenticated && !task.Public) {
 			continue
 		}
 		node, ok := visibleTargets[task.TargetNodeID]
 		if !ok {
 			continue
 		}
+		ipVersion := task.IPVersion
+		if ipVersion != model.ProbeIPVersion4 && ipVersion != model.ProbeIPVersion6 {
+			ipVersion = model.InferLatencyIPVersion(task.Target)
+		}
+		task.IPVersion = ipVersion
 		publicTargets = append(publicTargets, model.LatencyTarget{
-			TaskID: task.ID, Node: node.Public(), Type: task.Type,
+			TaskID: task.ID, Node: node.Public(), IPVersion: ipVersion, Type: task.Type,
 			IntervalSeconds: task.IntervalSeconds, Samples: task.Samples,
 		})
-		visibleTasks[task.ID] = struct{}{}
+		visibleTasks[task.ID] = task
 	}
+	slices.SortFunc(publicTargets, func(a, b model.LatencyTarget) int {
+		if c := cmp.Compare(b.Node.Weight, a.Node.Weight); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.Node.Group, b.Node.Group); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.Node.Name, b.Node.Name); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(nodeOrder[a.Node.ID], nodeOrder[b.Node.ID]); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.IPVersion, b.IPVersion); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.Type, b.Type); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.TaskID, b.TaskID)
+	})
 	latest, err := a.store.LatestLatencyResults(ctx, now.Add(-24*time.Hour))
 	if err != nil {
 		return model.LatencyOverview{}, err
@@ -191,8 +220,15 @@ func (a *API) loadLatencyOverview(ctx context.Context, authenticated bool) (mode
 		if _, ok := visibleProbes[result.ProbeNodeID]; !ok {
 			continue
 		}
-		if _, ok := visibleTasks[result.TaskID]; !ok {
+		task, ok := visibleTasks[result.TaskID]
+		if !ok {
 			continue
+		}
+		if result.IPVersion == 0 {
+			result.IPVersion = task.IPVersion
+		}
+		if result.Type == "" {
+			result.Type = task.Type
 		}
 		if !authenticated && result.Error != "" {
 			result.Error = "probe failed"
@@ -217,8 +253,38 @@ func (a *API) handlePublicLatencyHistory(w http.ResponseWriter, r *http.Request)
 	}
 	probeNodeID := strings.TrimSpace(r.URL.Query().Get("probe_node_id"))
 	targetNodeID := strings.TrimSpace(r.URL.Query().Get("target_node_id"))
-	if probeNodeID == "" || targetNodeID == "" {
-		writeError(w, http.StatusBadRequest, "latency_pair_required", "probe_node_id and target_node_id are required")
+	rawTaskID := strings.TrimSpace(r.URL.Query().Get("task_id"))
+	rawIPVersion := strings.TrimSpace(r.URL.Query().Get("ip_version"))
+	rawType := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("type")))
+
+	var taskID int64
+	if rawTaskID != "" {
+		parsedTaskID, parseErr := parsePositiveID(rawTaskID)
+		if parseErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid_task_id", "task_id must be a positive integer")
+			return
+		}
+		taskID = parsedTaskID
+	}
+	var ipVersion int
+	if rawIPVersion != "" {
+		parsedVersion, parseErr := strconv.Atoi(rawIPVersion)
+		if parseErr != nil || (parsedVersion != model.ProbeIPVersion4 && parsedVersion != model.ProbeIPVersion6) {
+			writeError(w, http.StatusBadRequest, "invalid_ip_version", "ip_version must be 4 or 6")
+			return
+		}
+		ipVersion = parsedVersion
+	}
+	var probeType model.ProbeType
+	if rawType != "" {
+		if rawType != string(model.ProbeICMP) && rawType != string(model.ProbeTCP) {
+			writeError(w, http.StatusBadRequest, "invalid_probe_type", "type must be icmp or tcp")
+			return
+		}
+		probeType = model.ProbeType(rawType)
+	}
+	if probeNodeID == "" || (taskID == 0 && targetNodeID == "") {
+		writeError(w, http.StatusBadRequest, "latency_pair_required", "probe_node_id and either task_id or target_node_id are required")
 		return
 	}
 	probeNode, err := a.store.GetNode(r.Context(), probeNodeID)
@@ -226,27 +292,72 @@ func (a *API) handlePublicLatencyHistory(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotFound, "probe_node_not_found", "measurement node was not found")
 		return
 	}
-	targetNode, err := a.store.GetNode(r.Context(), targetNodeID)
-	if err != nil || targetNode.Role != model.NodeRoleMonitor || (targetNode.Hidden && !authenticated) {
-		writeError(w, http.StatusNotFound, "target_node_not_found", "target node was not found")
-		return
-	}
 	tasks, err := a.store.ListProbeTasks(r.Context(), "")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store_error", "could not read latency targets")
 		return
 	}
-	visible := false
-	for _, task := range tasks {
-		if task.Purpose == "latency" && task.TargetNodeID == targetNodeID && (authenticated || task.Public) {
-			visible = true
-			break
+
+	var selectedTaskID int64
+	if taskID > 0 {
+		var matchedTask model.ProbeTask
+		found := false
+		for _, task := range tasks {
+			if task.ID == taskID && task.Purpose == model.ProbePurposeLatency && (authenticated || task.Public) {
+				matchedTask = task
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeError(w, http.StatusNotFound, "latency_target_not_found", "latency target was not found")
+			return
+		}
+		targetNode, err := a.store.GetNode(r.Context(), matchedTask.TargetNodeID)
+		if err != nil || targetNode.Role != model.NodeRoleMonitor || (targetNode.Hidden && !authenticated) {
+			writeError(w, http.StatusNotFound, "target_node_not_found", "target node was not found")
+			return
+		}
+		if targetNodeID != "" && targetNodeID != matchedTask.TargetNodeID {
+			writeError(w, http.StatusBadRequest, "latency_target_mismatch", "target_node_id does not match task_id")
+			return
+		}
+		if (ipVersion != 0 && matchedTask.IPVersion != ipVersion) || (probeType != "" && matchedTask.Type != probeType) {
+			writeError(w, http.StatusBadRequest, "latency_target_mismatch", "filter parameters do not match task_id")
+			return
+		}
+		selectedTaskID = matchedTask.ID
+	} else {
+		targetNode, err := a.store.GetNode(r.Context(), targetNodeID)
+		if err != nil || targetNode.Role != model.NodeRoleMonitor || (targetNode.Hidden && !authenticated) {
+			writeError(w, http.StatusNotFound, "target_node_not_found", "target node was not found")
+			return
+		}
+		matching := make([]model.ProbeTask, 0, 4)
+		for _, task := range tasks {
+			if task.Purpose != model.ProbePurposeLatency || task.TargetNodeID != targetNodeID {
+				continue
+			}
+			if !authenticated && !task.Public {
+				continue
+			}
+			if ipVersion != 0 && task.IPVersion != ipVersion {
+				continue
+			}
+			if probeType != "" && task.Type != probeType {
+				continue
+			}
+			matching = append(matching, task)
+		}
+		if len(matching) == 0 {
+			writeError(w, http.StatusNotFound, "latency_target_not_found", "latency target was not found")
+			return
+		}
+		if len(matching) == 1 {
+			selectedTaskID = matching[0].ID
 		}
 	}
-	if !visible {
-		writeError(w, http.StatusNotFound, "latency_target_not_found", "latency target was not found")
-		return
-	}
+
 	hours, _ := strconv.ParseFloat(r.URL.Query().Get("hours"), 64)
 	if hours <= 0 {
 		hours = 24
@@ -258,15 +369,31 @@ func (a *API) handlePublicLatencyHistory(w http.ResponseWriter, r *http.Request)
 	}
 	end := time.Now().UTC()
 	start := end.Add(-time.Duration(hours * float64(time.Hour)))
-	results, err := a.store.LatencyHistory(r.Context(), probeNodeID, targetNodeID, start, end, 20000)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store_error", "could not query latency history")
-		return
-	}
-	summary, err := a.store.LatencyWindowSummary(r.Context(), probeNodeID, targetNodeID, start, end)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store_error", "could not summarize latency history")
-		return
+
+	var results []model.LatencyResult
+	var summary model.LatencyWindowSummary
+	if selectedTaskID > 0 {
+		results, err = a.store.LatencyTaskHistory(r.Context(), probeNodeID, selectedTaskID, start, end, 20000)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "store_error", "could not query latency history")
+			return
+		}
+		summary, err = a.store.LatencyTaskWindowSummary(r.Context(), probeNodeID, selectedTaskID, start, end)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "store_error", "could not summarize latency history")
+			return
+		}
+	} else {
+		results, err = a.store.LatencyHistory(r.Context(), probeNodeID, targetNodeID, start, end, 20000)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "store_error", "could not query latency history")
+			return
+		}
+		summary, err = a.store.LatencyWindowSummary(r.Context(), probeNodeID, targetNodeID, start, end)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "store_error", "could not summarize latency history")
+			return
+		}
 	}
 	results = downsampleLatency(results, maxPoints)
 	if !authenticated {
@@ -424,9 +551,13 @@ func (a *API) handleAdminSaveLatencyTarget(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		task.ID = parsedID
+	} else {
+		task.ID = 0
 	}
-	task.Name, task.Target = strings.TrimSpace(task.Name), strings.TrimSpace(task.Target)
-	task.Purpose, task.RunOn, task.NodeIDs = "latency", model.NodeRoleProbe, nil
+	task.Name = strings.TrimSpace(task.Name)
+	task.Target = strings.TrimSpace(task.Target)
+	task.TargetNodeID = strings.TrimSpace(task.TargetNodeID)
+	task.Purpose, task.RunOn, task.NodeIDs = model.ProbePurposeLatency, model.NodeRoleProbe, nil
 	task.ExpectedStatus, task.ExpectedValue = 0, ""
 	if task.Samples <= 0 {
 		task.Samples = 3
@@ -434,6 +565,28 @@ func (a *API) handleAdminSaveLatencyTarget(w http.ResponseWriter, r *http.Reques
 	if task.Type != model.ProbeICMP && task.Type != model.ProbeTCP {
 		writeError(w, http.StatusBadRequest, "invalid_latency_target", "latency targets must use ICMP or TCP")
 		return
+	}
+	if !model.ValidProbeIPVersion(task.IPVersion) {
+		writeError(w, http.StatusBadRequest, "invalid_latency_target", "ip_version must be 4 or 6")
+		return
+	}
+	if task.IPVersion == model.ProbeIPVersionAuto {
+		task.IPVersion = model.InferLatencyIPVersion(task.Target)
+	}
+	if task.Type == model.ProbeICMP {
+		normalized, normErr := model.NormalizeICMPTarget(task.Target, task.IPVersion)
+		if normErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid_latency_target", normErr.Error())
+			return
+		}
+		task.Target = normalized
+	} else {
+		normalized, normErr := model.ValidateTCPTarget(task.Target, task.IPVersion)
+		if normErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid_latency_target", normErr.Error())
+			return
+		}
+		task.Target = normalized
 	}
 	targetNode, err := a.store.GetNode(r.Context(), task.TargetNodeID)
 	if err != nil || targetNode.Role != model.NodeRoleMonitor {
@@ -454,12 +607,16 @@ func (a *API) handleAdminSaveLatencyTarget(w http.ResponseWriter, r *http.Reques
 	}
 	updateFound := task.ID == 0
 	for _, existing := range all {
-		if existing.Purpose == "latency" && existing.TargetNodeID == task.TargetNodeID && existing.ID != task.ID {
-			writeError(w, http.StatusConflict, "latency_target_exists", "this monitored server already has a latency target")
+		if existing.Purpose == model.ProbePurposeLatency &&
+			existing.TargetNodeID == task.TargetNodeID &&
+			existing.IPVersion == task.IPVersion &&
+			existing.Type == task.Type &&
+			existing.ID != task.ID {
+			writeError(w, http.StatusConflict, "latency_target_exists", "this monitored server already has a latency target for this IP version and protocol")
 			return
 		}
 		if task.ID != 0 && existing.ID == task.ID {
-			if existing.Purpose != "latency" {
+			if existing.Purpose != model.ProbePurposeLatency {
 				writeError(w, http.StatusNotFound, "latency_target_not_found", "latency target was not found")
 				return
 			}
@@ -474,8 +631,12 @@ func (a *API) handleAdminSaveLatencyTarget(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		if current, listErr := a.store.ListAllProbeTasks(r.Context()); listErr == nil {
 			for _, existing := range current {
-				if existing.Purpose == "latency" && existing.TargetNodeID == task.TargetNodeID && existing.ID != task.ID {
-					writeError(w, http.StatusConflict, "latency_target_exists", "this monitored server already has a latency target")
+				if existing.Purpose == model.ProbePurposeLatency &&
+					existing.TargetNodeID == task.TargetNodeID &&
+					existing.IPVersion == task.IPVersion &&
+					existing.Type == task.Type &&
+					existing.ID != task.ID {
+					writeError(w, http.StatusConflict, "latency_target_exists", "this monitored server already has a latency target for this IP version and protocol")
 					return
 				}
 			}

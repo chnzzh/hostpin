@@ -138,8 +138,30 @@ func TestPostgresMigrationsAndMetricPartition(t *testing.T) {
 		t.Fatalf("PostgreSQL measurement inventory omitted the monitor: %#v %v", measurementNodes, err)
 	}
 	latencyLatest, err := repository.LatestLatencyResults(ctx, now.Add(-time.Minute))
-	if err != nil || len(latencyLatest) != 1 || latencyLatest[0].TargetNodeID != nodeID || latencyLatest[0].LossPercent != 33.333 {
+	if err != nil || len(latencyLatest) != 1 || latencyLatest[0].TargetNodeID != nodeID || latencyLatest[0].LossPercent != 33.333 || latencyLatest[0].IPVersion != 4 || latencyLatest[0].Type != model.ProbeTCP {
 		t.Fatalf("PostgreSQL latency result failed: %#v %v", latencyLatest, err)
+	}
+	latencyV6Task, err := repository.SaveProbeTask(ctx, model.ProbeTask{
+		Name: "PG route v6", Type: model.ProbeICMP, IPVersion: 6, Target: "2001:db8::1",
+		IntervalSeconds: 30, TimeoutSeconds: 2, Purpose: "latency",
+		RunOn: model.NodeRoleProbe, TargetNodeID: nodeID, Public: true, Samples: 3, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("PostgreSQL dual-stack IPv6 latency task failed: %v", err)
+	}
+	if err := repository.SaveProbeResult(ctx, model.ProbeResult{
+		NodeID: probeNodeID, TaskID: latencyV6Task.ID, ReceivedAt: now, CollectedAt: now,
+		Success: true, LatencyMS: 19.5, LossPercent: 0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	v6History, err := repository.LatencyTaskHistory(ctx, probeNodeID, latencyV6Task.ID, now.Add(-time.Minute), now.Add(time.Minute), 100)
+	if err != nil || len(v6History) != 1 || v6History[0].IPVersion != 6 || v6History[0].Type != model.ProbeICMP || v6History[0].LatencyMS != 19.5 {
+		t.Fatalf("PostgreSQL LatencyTaskHistory failed: %#v %v", v6History, err)
+	}
+	v6Summary, err := repository.LatencyTaskWindowSummary(ctx, probeNodeID, latencyV6Task.ID, now.Add(-time.Minute), now.Add(time.Minute))
+	if err != nil || v6Summary.SampleCount != 1 || v6Summary.SuccessCount != 1 || v6Summary.AverageLatencyMS != 19.5 {
+		t.Fatalf("PostgreSQL LatencyTaskWindowSummary failed: %#v %v", v6Summary, err)
 	}
 	latest, err := repository.LatestMetric(ctx, nodeID)
 	if err != nil || latest.CPU != 25 || latest.MonthlyRxBytes != 2_500 || latest.MonthlyTxBytes != 1_250 {

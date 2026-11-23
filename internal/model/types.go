@@ -2,6 +2,12 @@ package model
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/netip"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -326,6 +332,10 @@ const (
 	ProbePurposeCarrierTelecom = "carrier.telecom"
 	ProbePurposeCarrierUnicom  = "carrier.unicom"
 	ProbePurposeCarrierMobile  = "carrier.mobile"
+
+	ProbeIPVersionAuto = 0
+	ProbeIPVersion4    = 4
+	ProbeIPVersion6    = 6
 )
 
 func IsCarrierProbePurpose(purpose string) bool {
@@ -337,10 +347,115 @@ func IsCarrierProbePurpose(purpose string) bool {
 	}
 }
 
+// ValidProbeIPVersion reports whether ipVersion is auto (0), IPv4 (4), or IPv6 (6).
+func ValidProbeIPVersion(ipVersion int) bool {
+	return ipVersion == ProbeIPVersionAuto || ipVersion == ProbeIPVersion4 || ipVersion == ProbeIPVersion6
+}
+
+// InferLatencyIPVersion infers 6 when target uses an IPv6 literal host, otherwise 4.
+func InferLatencyIPVersion(target string) int {
+	trimmed := strings.TrimSpace(target)
+	if host, _, err := net.SplitHostPort(trimmed); err == nil {
+		if addr, addrErr := netip.ParseAddr(host); addrErr == nil && addr.Is6() {
+			return ProbeIPVersion6
+		}
+		return ProbeIPVersion4
+	}
+	if len(trimmed) >= 2 && trimmed[0] == '[' && trimmed[len(trimmed)-1] == ']' {
+		trimmed = trimmed[1 : len(trimmed)-1]
+	}
+	if addr, err := netip.ParseAddr(trimmed); err == nil && addr.Is6() {
+		return ProbeIPVersion6
+	}
+	return ProbeIPVersion4
+}
+
+// NormalizeICMPTarget trims target, strips brackets around valid IPv6 literals,
+// rejects ports or invalid colons, and enforces IP literal family matching.
+func NormalizeICMPTarget(target string, ipVersion int) (string, error) {
+	if !ValidProbeIPVersion(ipVersion) {
+		return "", fmt.Errorf("ip_version must be 0, 4, or 6")
+	}
+	trimmed := strings.TrimSpace(target)
+	if trimmed == "" || strings.ContainsAny(trimmed, " /\\") {
+		return "", errors.New("ICMP target must be a host name or IP address")
+	}
+	if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+		inner := trimmed[1 : len(trimmed)-1]
+		if addr, err := netip.ParseAddr(inner); err == nil && addr.Is6() {
+			trimmed = inner
+		} else {
+			return "", errors.New("ICMP target must be a host name or IP address")
+		}
+	}
+	if strings.ContainsAny(trimmed, "[]") {
+		if _, _, err := net.SplitHostPort(trimmed); err == nil {
+			return "", errors.New("ICMP target must not include a port")
+		}
+		return "", errors.New("ICMP target must be a host name or IP address")
+	}
+	addr, addrErr := netip.ParseAddr(trimmed)
+	if addrErr != nil {
+		if strings.Contains(trimmed, ":") {
+			return "", errors.New("ICMP target must not include a port")
+		}
+		return trimmed, nil
+	}
+	if ipVersion == ProbeIPVersion4 && addr.Is6() {
+		return "", errors.New("ICMP target is an IPv6 address but ip_version is 4")
+	}
+	if ipVersion == ProbeIPVersion6 && addr.Is4() {
+		return "", errors.New("ICMP target is an IPv4 address but ip_version is 6")
+	}
+	return trimmed, nil
+}
+
+// ValidateTCPTarget verifies host:port with numeric port 1..65535 and enforces
+// IP literal family matching when ipVersion is 4 or 6.
+func ValidateTCPTarget(target string, ipVersion int) (string, error) {
+	if !ValidProbeIPVersion(ipVersion) {
+		return "", fmt.Errorf("ip_version must be 0, 4, or 6")
+	}
+	trimmed := strings.TrimSpace(target)
+	host, portStr, err := net.SplitHostPort(trimmed)
+	if err != nil || host == "" || strings.ContainsAny(host, " /\\") {
+		return "", errors.New("TCP target must use host:port")
+	}
+	if !isASCIIDigits(portStr) {
+		return "", errors.New("TCP target port must be between 1 and 65535")
+	}
+	port, portErr := strconv.Atoi(portStr)
+	if portErr != nil || port < 1 || port > 65535 {
+		return "", errors.New("TCP target port must be between 1 and 65535")
+	}
+	if addr, addrErr := netip.ParseAddr(host); addrErr == nil {
+		if ipVersion == ProbeIPVersion4 && addr.Is6() {
+			return "", errors.New("TCP target is an IPv6 address but ip_version is 4")
+		}
+		if ipVersion == ProbeIPVersion6 && addr.Is4() {
+			return "", errors.New("TCP target is an IPv4 address but ip_version is 6")
+		}
+	}
+	return net.JoinHostPort(host, portStr), nil
+}
+
+func isASCIIDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 type ProbeTask struct {
 	ID              int64     `json:"id"`
 	Name            string    `json:"name"`
 	Type            ProbeType `json:"type"`
+	IPVersion       int       `json:"ip_version,omitempty"`
 	Target          string    `json:"target"`
 	IntervalSeconds int       `json:"interval_seconds"`
 	TimeoutSeconds  int       `json:"timeout_seconds"`
@@ -391,6 +506,7 @@ type LatencyProbeNode struct {
 type LatencyTarget struct {
 	TaskID          int64      `json:"task_id"`
 	Node            PublicNode `json:"node"`
+	IPVersion       int        `json:"ip_version"`
 	Type            ProbeType  `json:"type"`
 	IntervalSeconds int        `json:"interval_seconds"`
 	Samples         int        `json:"samples"`
@@ -400,6 +516,8 @@ type LatencyResult struct {
 	ProbeNodeID  string    `json:"probe_node_id"`
 	TargetNodeID string    `json:"target_node_id"`
 	TaskID       int64     `json:"task_id"`
+	IPVersion    int       `json:"ip_version,omitempty"`
+	Type         ProbeType `json:"type,omitempty"`
 	CollectedAt  time.Time `json:"collected_at"`
 	ReceivedAt   time.Time `json:"received_at"`
 	Success      bool      `json:"success"`

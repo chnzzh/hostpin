@@ -11,13 +11,14 @@ import (
 	"github.com/chnzzh/hostpin/internal/model"
 )
 
-const latencyResultColumns = `r.node_id, t.target_node_id, r.task_id, r.ts, r.collected_at, r.success, r.latency_ms, r.loss_percent, r.error`
+const latencyResultColumns = `r.node_id, t.target_node_id, r.task_id, t.ip_version, t.type, r.ts, r.collected_at, r.success, r.latency_ms, r.loss_percent, r.error`
 
 func scanLatencyResult(row rowScanner) (model.LatencyResult, error) {
 	var result model.LatencyResult
 	var receivedAt, collectedAt int64
 	if err := row.Scan(
 		&result.ProbeNodeID, &result.TargetNodeID, &result.TaskID,
+		&result.IPVersion, &result.Type,
 		&receivedAt, &collectedAt, &result.Success, &result.LatencyMS,
 		&result.LossPercent, &result.Error,
 	); err != nil {
@@ -32,15 +33,17 @@ func (s *SQLStore) LatestLatencyResults(ctx context.Context, since time.Time) ([
 	type latencyTaskRow struct {
 		id           int64
 		targetNodeID string
+		ipVersion    int
+		probeType    model.ProbeType
 	}
-	taskRows, err := s.readDB.QueryContext(ctx, `SELECT id, target_node_id FROM probe_tasks WHERE purpose = 'latency' ORDER BY target_node_id, id`)
+	taskRows, err := s.readDB.QueryContext(ctx, `SELECT id, target_node_id, ip_version, type FROM probe_tasks WHERE purpose = 'latency' ORDER BY target_node_id, id`)
 	if err != nil {
 		return nil, err
 	}
 	tasks := make([]latencyTaskRow, 0)
 	for taskRows.Next() {
 		var task latencyTaskRow
-		if err := taskRows.Scan(&task.id, &task.targetNodeID); err != nil {
+		if err := taskRows.Scan(&task.id, &task.targetNodeID, &task.ipVersion, &task.probeType); err != nil {
 			taskRows.Close()
 			return nil, err
 		}
@@ -111,6 +114,8 @@ func (s *SQLStore) LatestLatencyResults(ctx context.Context, since time.Time) ([
 				return nil, err
 			}
 			result.TargetNodeID = task.targetNodeID
+			result.IPVersion = task.ipVersion
+			result.Type = task.probeType
 			result.ReceivedAt = timeFromMillis(receivedAt)
 			result.CollectedAt = timeFromMillis(collectedAt)
 			results = append(results, result)
@@ -184,8 +189,93 @@ func (s *SQLStore) LatencyWindowSummary(ctx context.Context, probeNodeID, target
 		query += ` AND t.target_node_id = ?`
 		args = append(args, targetNodeID)
 	}
+	return scanLatencyWindowSummary(s.readDB.QueryRowContext(ctx, s.q(query), args...))
+}
+
+// LatencyTaskHistory queries probe_results directly by (node_id, task_id, ts)
+// for a single latency task without scanning sibling tasks on the target node.
+func (s *SQLStore) LatencyTaskHistory(ctx context.Context, probeNodeID string, taskID int64, start, end time.Time, limit int) ([]model.LatencyResult, error) {
+	if taskID <= 0 {
+		return []model.LatencyResult{}, nil
+	}
+	if limit <= 0 || limit > 20000 {
+		limit = 1000
+	}
+	var targetNodeID string
+	var ipVersion int
+	var probeType model.ProbeType
+	err := s.readDB.QueryRowContext(ctx, s.q(`SELECT target_node_id, ip_version, type FROM probe_tasks WHERE id = ? AND purpose = 'latency'`), taskID).
+		Scan(&targetNodeID, &ipVersion, &probeType)
+	if errors.Is(err, sql.ErrNoRows) {
+		return []model.LatencyResult{}, nil
+	}
+	if err != nil {
+		return nil, mapSQLError(err)
+	}
+
+	query := `SELECT node_id, task_id, ts, collected_at, success, latency_ms, loss_percent, error FROM probe_results WHERE `
+	args := make([]any, 0, 5)
+	if probeNodeID != "" {
+		query += `node_id = ? AND `
+		args = append(args, probeNodeID)
+	}
+	query += `task_id = ? AND ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT ?`
+	args = append(args, taskID, millis(start), millis(end), limit)
+
+	rows, err := s.readDB.QueryContext(ctx, s.q(query), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	results := make([]model.LatencyResult, 0)
+	for rows.Next() {
+		var result model.LatencyResult
+		var receivedAt, collectedAt int64
+		if err := rows.Scan(
+			&result.ProbeNodeID, &result.TaskID, &receivedAt, &collectedAt,
+			&result.Success, &result.LatencyMS, &result.LossPercent, &result.Error,
+		); err != nil {
+			return nil, mapSQLError(err)
+		}
+		result.TargetNodeID = targetNodeID
+		result.IPVersion = ipVersion
+		result.Type = probeType
+		result.ReceivedAt = timeFromMillis(receivedAt)
+		result.CollectedAt = timeFromMillis(collectedAt)
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	slices.Reverse(results)
+	return results, nil
+}
+
+// LatencyTaskWindowSummary summarizes probe_results for one latency task using
+// the covering index on (node_id, task_id, ts, success, latency_ms, loss_percent).
+func (s *SQLStore) LatencyTaskWindowSummary(ctx context.Context, probeNodeID string, taskID int64, start, end time.Time) (model.LatencyWindowSummary, error) {
+	if taskID <= 0 {
+		return model.LatencyWindowSummary{}, nil
+	}
+	query := `SELECT COUNT(*),
+		COALESCE(SUM(CASE WHEN success AND latency_ms >= 0 THEN 1 ELSE 0 END), 0),
+		COALESCE(AVG(CASE WHEN success AND latency_ms >= 0 THEN latency_ms END), 0),
+		COALESCE(AVG(loss_percent), 0)
+		FROM probe_results
+		WHERE `
+	args := make([]any, 0, 4)
+	if probeNodeID != "" {
+		query += `node_id = ? AND `
+		args = append(args, probeNodeID)
+	}
+	query += `task_id = ? AND ts >= ? AND ts <= ?`
+	args = append(args, taskID, millis(start), millis(end))
+	return scanLatencyWindowSummary(s.readDB.QueryRowContext(ctx, s.q(query), args...))
+}
+
+func scanLatencyWindowSummary(row rowScanner) (model.LatencyWindowSummary, error) {
 	var summary model.LatencyWindowSummary
-	err := s.readDB.QueryRowContext(ctx, s.q(query), args...).Scan(
+	err := row.Scan(
 		&summary.SampleCount,
 		&summary.SuccessCount,
 		&summary.AverageLatencyMS,
